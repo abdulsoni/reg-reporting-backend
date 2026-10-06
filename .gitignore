@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables (may contain credentials)
+.env
+.env.*
+!.env.example
+
+# Generated sample PDFs
+corep_report.pdf
+*.pdf
+
+# Seeded demo system databases and this service's own SQLite file
+src/reg_reporting_back/data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
