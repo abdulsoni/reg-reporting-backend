@@ -283,6 +283,7 @@ def evidence_values(
 def explore(
     adapter: DatabaseAdapter,
     request: ExploreRequest,
+    system_name: str,
 ) -> ExploreResult:
     """Resolve one attribute of one connected system."""
 
@@ -299,7 +300,7 @@ def explore(
                 request.attribute,
             ),
             request.context,
-            request.system,
+            system_name,
             request.table,
             request.attribute,
         )
@@ -307,7 +308,7 @@ def explore(
     except AmbiguousMetadataError:
         return ExploreResult(
             status=AMBIGUOUS_METADATA,
-            system=request.system,
+            system=system_name,
             table_name=request.table,
             attribute_name=request.attribute,
             next_action=ACTION_DISAMBIGUATE,
@@ -317,7 +318,7 @@ def explore(
     except MetadataError:
         return ExploreResult(
             status=METADATA_NOT_FOUND,
-            system=request.system,
+            system=system_name,
             table_name=request.table,
             attribute_name=request.attribute,
             next_action=ACTION_REVIEW_METADATA,
@@ -328,7 +329,7 @@ def explore(
 
     pending = outstanding_systems(
         parsed,
-        request.system,
+        system_name,
     )
 
     if not record.sources:
@@ -357,7 +358,7 @@ def explore(
 
     return ExploreResult(
         status=status,
-        system=request.system,
+        system=system_name,
         table_name=record.table_name,
         attribute_name=record.attribute_name,
         transformation=record.transformation,

@@ -119,3 +119,89 @@ def test_disconnect_revokes_access(client, connect) -> None:
         "/lineage/sample", json={"system": "collateral_db", "table": "collateral"}
     )
     assert response.status_code == 400
+
+
+def test_a_system_can_be_connected_by_db_type_and_database(client) -> None:
+    response = client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "loans_db.sqlite"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["system"] == "loans_db"
+    assert result["db_type"] == "sqlite"
+    assert result["database"] == "loans_db.sqlite"
+    assert result["table_count"] > 0
+
+
+def test_a_database_name_is_normalised_to_its_file(client) -> None:
+    result = client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "loans_db"},
+    ).json()
+
+    assert result["system"] == "loans_db"
+    assert result["database"] == "loans_db.sqlite"
+
+
+def test_the_database_alone_resolves_a_system(client) -> None:
+    result = client.post(
+        "/lineage/connect",
+        json={"database": "collateral_db.sqlite"},
+    ).json()
+
+    assert result["system"] == "collateral_db"
+
+
+def test_tables_are_read_from_a_target_without_a_system_name(client) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "loans_db.sqlite"},
+    )
+
+    tables = client.post(
+        "/lineage/tables",
+        json={"db_type": "sqlite", "database": "loans_db.sqlite"},
+    ).json()
+
+    assert "facility" in {table["name"] for table in tables["tables"]}
+
+
+def test_a_system_name_still_overrides_the_target(client, connect) -> None:
+    connect("loans_db")
+
+    tables = client.post(
+        "/lineage/tables",
+        json={"system": "loans_db", "database": "reporting_db.sqlite"},
+    ).json()
+
+    assert "facility" in {table["name"] for table in tables["tables"]}
+
+
+def test_an_unregistered_target_is_refused(client) -> None:
+    response = client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "no_such_db.sqlite"},
+    )
+
+    assert response.status_code == 400
+    assert "No registered system matches" in response.json()["detail"]
+
+
+def test_a_target_can_be_explored_after_connecting_by_target(client) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "reporting_db.sqlite"},
+    )
+
+    sample = client.post(
+        "/lineage/sample",
+        json={
+            "db_type": "sqlite",
+            "database": "reporting_db.sqlite",
+            "table": "c0700_facts",
+        },
+    ).json()
+
+    assert sample["row_count"] >= 1

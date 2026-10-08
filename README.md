@@ -69,13 +69,13 @@ curl.exe -X POST http://127.0.0.1:8000/reports/generate-pdf -H "Content-Type: ap
 curl.exe -X POST http://127.0.0.1:8000/documents/upload-pdf -F "file=@corep_c07.pdf"
 
 # 3. Approve a system, then look at what it exposes
-curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"system":"reporting_db"}'
-curl.exe -X POST http://127.0.0.1:8000/lineage/tables -H "Content-Type: application/json" -d '{"system":"reporting_db"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/tables -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite"}'
 
 # 4. Trace a datapoint, approving each system it stops at, then resume
-curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"system":"reporting_db","datapoint_id":"<dp id>"}'
-curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"system":"sa_engine"}'
-curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"system":"reporting_db","datapoint_id":"<dp id>","trace_id":"<trace id>"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite","datapoint_id":"<dp id>"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"sa_engine.sqlite"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite","datapoint_id":"<dp id>","trace_id":"<trace id>"}'
 
 # 5. Render the result
 curl.exe http://127.0.0.1:8000/lineage/trace/<trace id>/graph
@@ -166,6 +166,24 @@ one input.
 | `GET` | `/lineage/trace/{id}/hops` | The hop table |
 | `GET` | `/lineage/trace/{id}/graph` | React Flow nodes and edges |
 
+### Identifying a system
+
+Endpoints that read a client system (`/lineage/connect`, `/tables`, `/schema`,
+`/sample`, `/explore`, `/trace`) take a target: either `system`, or the pair
+`db_type` + `database`. The pair is resolved against the system registry, so the
+UI can offer a connection-type dropdown and send what the user picked:
+
+```json
+{ "db_type": "sqlite", "database": "reporting_db.sqlite" }
+```
+
+`database` matches either the registry name (`reporting_db`) or its file
+(`reporting_db.sqlite`), and `db_type` is the connection type shown in the UI
+(`sqlite` today, alongside `mssql`). A pair that matches no registered system is
+refused, so a request can never point the explorer at an arbitrary system; `api`
+is not a readable database and is rejected the same way. `system` wins when both
+are sent, which keeps older requests and explicit overrides working.
+
 ### Exploring a column
 
 `POST /lineage/explore` answers with a status and, when relevant, a next action:
@@ -180,11 +198,12 @@ one input.
 ### Tracing
 
 ```json
-{ "system": "reporting_db", "datapoint_id": "dp-…", "trace_id": "trace-…" }
+{ "db_type": "sqlite", "database": "reporting_db.sqlite", "datapoint_id": "dp-…", "trace_id": "trace-…" }
 ```
 
-`trace_id` is only needed to resume. The response reports what the tracer could
-reach and what it needs next:
+`system` may be sent instead of `db_type` + `database` (see
+[Identifying a system](#identifying-a-system)). `trace_id` is only needed to
+resume. The response reports what the tracer could reach and what it needs next:
 
 ```json
 {

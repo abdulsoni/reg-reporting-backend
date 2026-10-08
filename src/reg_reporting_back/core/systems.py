@@ -106,3 +106,37 @@ def entry_reference(system_name: str) -> tuple[str, str] | None:
     if definition is None or not definition.entry_table:
         return None
     return definition.entry_table, definition.entry_attribute or ""
+
+
+def find_system_for_target(
+    db_type: str | None,
+    database: str | None,
+) -> SystemDefinition | None:
+    """Resolve a registry system from a client-supplied ``db_type`` + ``database``.
+
+    The database matches either the registry's ``database_name`` (``reporting_db``)
+    or its ``database_file`` (``reporting_db.sqlite``), so a client can send
+    either. The comparison is case-insensitive and ignores surrounding
+    whitespace. When ``db_type`` is omitted the database alone is matched, which
+    is unambiguous for the seeded systems because their names are unique.
+    """
+
+    wanted_db = (database or "").strip().lower()
+    if not wanted_db:
+        return None
+
+    wanted_type = (db_type or "").strip().lower()
+
+    for definition in SYSTEMS.values():
+        if wanted_type and definition.db_type.lower() != wanted_type:
+            continue
+
+        candidates = {
+            definition.database_name.lower(),
+            definition.database_file.lower(),
+        }
+
+        if wanted_db in candidates:
+            return definition
+
+    return None

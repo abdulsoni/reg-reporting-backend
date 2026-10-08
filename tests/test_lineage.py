@@ -238,3 +238,85 @@ def test_a_graph_for_a_trace_with_no_hops_is_refused(client, connect, exposure_d
 
     # The hop from the first trace is still stored, so the graph still renders.
     assert response.status_code == 200
+
+
+def test_explore_accepts_a_db_type_and_database_target(client) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "reporting_db.sqlite"},
+    )
+
+    body = client.post(
+        "/lineage/explore",
+        json={
+            "db_type": "sqlite",
+            "database": "reporting_db.sqlite",
+            "table": "c0700_facts",
+            "attribute": "value",
+            "report_code": "C07.00",
+            "row_code": "0010",
+            "column_code": "0200",
+        },
+    ).json()
+
+    assert body["system"] == "reporting_db"
+    assert body["status"] == "IDENTIFIED"
+    assert body["source_from"] == "sa_engine.calc_sa_exposure.exposure_value"
+
+
+def test_explore_by_get_accepts_a_target(client) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "reporting_db.sqlite"},
+    )
+
+    response = client.get(
+        "/lineage/explore",
+        params={
+            "table": "c0700_facts",
+            "attribute": "value",
+            "db_type": "sqlite",
+            "database": "reporting_db.sqlite",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["system"] == "reporting_db"
+
+
+def test_trace_accepts_a_db_type_and_database_target(client, exposure_datapoint) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "reporting_db.sqlite"},
+    )
+
+    body = client.post(
+        "/lineage/trace",
+        json={
+            "db_type": "sqlite",
+            "database": "reporting_db.sqlite",
+            "datapoint_id": exposure_datapoint["id"],
+        },
+    ).json()
+
+    assert body["status"] == "CONNECTION_REQUIRED"
+    assert body["hops"][0]["system"] == "reporting_db"
+
+
+def test_trace_from_a_non_reporting_target_is_refused(client, exposure_datapoint) -> None:
+    client.post(
+        "/lineage/connect",
+        json={"db_type": "sqlite", "database": "loans_db.sqlite"},
+    )
+
+    response = client.post(
+        "/lineage/trace",
+        json={
+            "db_type": "sqlite",
+            "database": "loans_db.sqlite",
+            "datapoint_id": exposure_datapoint["id"],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "reporting layer" in response.json()["detail"]

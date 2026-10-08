@@ -25,19 +25,26 @@ def explore_attribute(payload: ExploreRequest) -> ExploreResult:
 
 @router.get("/explore", response_model=ExploreResult)
 def explore_attribute_by_query(
-    system: str,
     table: str,
     attribute: str,
+    system: str | None = None,
+    db_type: str | None = None,
+    database: str | None = None,
     report_code: str | None = None,
     row_code: str | None = None,
     column_code: str | None = None,
 ) -> ExploreResult:
-    """Query-parameter form of ``POST /lineage/explore``, for direct links."""
+    """Query-parameter form of ``POST /lineage/explore``, for direct links.
+
+    The target may be named by ``system`` or by ``db_type`` + ``database``.
+    """
 
     return run_operation(
         lambda: LineageService.explore(
             ExploreRequest(
                 system=system,
+                db_type=db_type,
+                database=database,
                 table=table,
                 attribute=attribute,
                 report_code=report_code,

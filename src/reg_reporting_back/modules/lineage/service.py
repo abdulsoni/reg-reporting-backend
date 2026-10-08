@@ -175,9 +175,14 @@ class LineageService:
     def explore(request: ExploreRequest) -> ExploreResult:
         """Resolve one attribute inside a connected system."""
 
+        system_name = ConnectionService.resolve_system(
+            request.system, request.db_type, request.database
+        )
+
         return explore(
-            ConnectionService.adapter_for(request.system),
+            ConnectionService.adapter_for(system_name),
             request,
+            system_name,
         )
 
     # ------------------------------------------------------------------
@@ -204,6 +209,13 @@ class LineageService:
             column_code=datapoint.column_code,
         )
 
+        # The system to act on: a registry name, or the pair resolved from
+        # db_type + database. Resolving here keeps the rest of the walk
+        # unchanged and works for both the start and the resume path.
+        system_name = ConnectionService.resolve_system(
+            request.system, request.db_type, request.database
+        )
+
         # ==============================================================
         # 1. START A NEW TRACE
         # ==============================================================
@@ -212,6 +224,7 @@ class LineageService:
             trace, entry = _start_new_trace(
                 request=request,
                 datapoint=datapoint,
+                system_name=system_name,
             )
 
             walk = _Walk(
@@ -253,13 +266,13 @@ class LineageService:
             # system was disconnected.
             resume_points = _resume_points(
                 existing_hops,
-                request.system,
+                system_name,
             )
 
             if not resume_points:
                 raise TraceError(
                     f"No pending lineage node was found for system "
-                    f"'{request.system}' in trace '{trace.id}'. "
+                    f"'{system_name}' in trace '{trace.id}'. "
                     "The system may already have been traced, or it is "
                     "not referenced by the existing lineage."
                 )
@@ -531,25 +544,20 @@ class LineageService:
 def _start_new_trace(
     request: TraceRequest,
     datapoint,
+    system_name: str,
 ):
     """Create a new report trace.
 
     A new report trace can only begin from reporting_db.
     """
 
-    if request.system != REPORTING_SYSTEM:
-        definition = get_system(
-            request.system
-        )
+    if system_name != REPORTING_SYSTEM:
+        definition = get_system(system_name)
 
-        label = (
-            definition.label
-            if definition
-            else request.system
-        )
+        label = definition.label if definition else system_name
 
         raise TraceError(
-            f"System '{request.system}' ({label}) is not a "
+            f"System '{system_name}' ({label}) is not a "
             "reporting layer, so a report datapoint cannot be "
             f"traced from it. Start the trace from {REPORTING_SYSTEM}."
         )

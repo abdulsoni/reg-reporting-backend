@@ -48,11 +48,19 @@ class DatapointContext(BaseModel):
 
 
 class ExploreRequest(BaseModel):
-    """Ask the explorer what a single attribute inside a connected system is."""
+    """Ask the explorer what a single attribute inside a connected system is.
+
+    The target may be named by ``system`` or by ``db_type`` + ``database``.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
-    system: str = Field(description="System the user has connected")
+    system: str | None = Field(
+        default=None,
+        description="Connected system name; omit to resolve from db_type + database",
+    )
+    db_type: str | None = None
+    database: str | None = None
     table: str = Field(min_length=1)
     attribute: str = Field(min_length=1)
     report_code: str | None = None
@@ -61,8 +69,10 @@ class ExploreRequest(BaseModel):
 
     @field_validator("system")
     @classmethod
-    def _clean_system(cls, value: str) -> str:
-        return value.strip().lower()
+    def _clean_system(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().lower() or None
 
     @property
     def context(self) -> DatapointContext:
@@ -96,9 +106,15 @@ class ExploreResult(BaseModel):
 
 
 class TraceRequest(BaseModel):
-    """Start a lineage trace from a report datapoint, or resume one."""
+    """Start a lineage trace from a report datapoint, or resume one.
 
-    system: str
+    The target system may be named by ``system`` or resolved from
+    ``db_type`` + ``database``.
+    """
+
+    system: str | None = None
+    db_type: str | None = None
+    database: str | None = None
     datapoint_id: str
     report_id: str | None = None
     # Required only when starting
@@ -111,8 +127,10 @@ class TraceRequest(BaseModel):
 
     @field_validator("system")
     @classmethod
-    def _clean_system(cls, value: str) -> str:
-        return value.strip().lower()
+    def _clean_system(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().lower() or None
 
 
 class HopStatus(StrEnum):

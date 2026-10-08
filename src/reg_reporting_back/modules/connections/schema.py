@@ -9,25 +9,38 @@ from .adapters import SUPPORTED_DB_TYPES
 MESSAGE_CONNECTED = "Connection established"
 
 
-def _strip(value: str) -> str:
-    value = value.strip()
-    if not value:
-        raise ValueError("must not be empty")
-    return value
+class ConnectionTarget(BaseModel):
+    """Identifies which registered system a request acts on.
 
-
-class ConnectRequest(BaseModel):
-    """Ask to expose one registered system to the lineage explorer.
-
-    Only ``system`` is required: the db type and database default to the values
-    in the system registry, so a request can never point the explorer at an
-    arbitrary server. The remaining fields are for database types that need
-    them; the password is used to validate the connection and is never stored.
+    Either ``system`` (a registry name such as ``reporting_db``) or the target
+    pair ``db_type`` + ``database`` may be supplied. When both are present the
+    service prefers ``system``; when only the pair is present the service
+    resolves it against the system registry, so a request can never point the
+    explorer at an arbitrary system.
     """
 
-    system: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    system: str | None = None
     db_type: str | None = None
     database: str | None = None
+
+    @field_validator("system")
+    @classmethod
+    def _clean_system(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip().lower() or None
+
+
+class ConnectRequest(ConnectionTarget):
+    """Ask to expose one registered system to the lineage explorer.
+
+    The target may be named by ``system`` or by ``db_type`` + ``database``. The
+    remaining fields are for database types that need them; the password is
+    used to validate the connection and is never stored.
+    """
+
     host: str | None = None
     port: int | None = Field(default=None, ge=1, le=65535)
     username: str | None = None
@@ -37,13 +50,6 @@ class ConnectRequest(BaseModel):
         alias="schema",
         description="Schema filter for database types that have schemas",
     )
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("system")
-    @classmethod
-    def _clean_system(cls, value: str) -> str:
-        return _strip(value).lower()
 
     @field_validator("username")
     @classmethod
@@ -78,16 +84,8 @@ class ConnectResult(BaseModel):
     connected_at: str | None = None
 
 
-class TableListRequest(BaseModel):
-    system: str
+class TableListRequest(ConnectionTarget):
     table_schema: str | None = Field(default=None, alias="schema")
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    @field_validator("system")
-    @classmethod
-    def _clean_system(cls, value: str) -> str:
-        return _strip(value).lower()
 
     def get_schema_name(self) -> str | None:
         return self.table_schema
