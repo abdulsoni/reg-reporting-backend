@@ -23,11 +23,13 @@ There are two trace operations:
 
 2. Resume an existing trace
    ------------------------
-   The client only provides ``trace_id`` and the system that has now been
-   connected.
+   The client only has to provide ``trace_id``. The system target is
+   optional and treated as a hint, never as a filter.
 
-   The service looks at the existing trace and automatically finds the
-   exact ``system.table.attribute`` nodes that were waiting for that system.
+   The service reads the stored trace and automatically resumes every
+   ``system.table.attribute`` node that was waiting and is connected now,
+   regardless of which system the request names. A request that names no
+   system at all still advances the trace.
 
    Example:
 
@@ -42,13 +44,13 @@ There are two trace operations:
    If DWH was previously disconnected, the resume request can simply be:
 
        {
-           "system": "dwh",
            "trace_id": "...",
            "datapoint_id": "..."
        }
 
    The service discovers ``dwh.mart_sa_exposure.off_bal_eur`` from the
-   stored trace and continues from there.
+   stored trace and continues from there. When nothing is left to resume
+   the trace is returned unchanged instead of failing.
 
 The trace only steps into a system the user has already connected. Anything
 else is parked in ``pending_systems`` so the UI can ask for the connection.
@@ -209,11 +211,16 @@ class LineageService:
             column_code=datapoint.column_code,
         )
 
-        # The system to act on: a registry name, or the pair resolved from
-        # db_type + database. Resolving here keeps the rest of the walk
-        # unchanged and works for both the start and the resume path.
-        system_name = ConnectionService.resolve_system(
-            request.system, request.db_type, request.database
+        # The system target is optional. It is only a hint: resolving it is
+        # skipped entirely when the request names nothing, so a resume that
+        # carries just ``trace_id`` still works. A new trace defaults to
+        # reporting_db, the only layer a report datapoint can start from.
+        system_name = (
+            ConnectionService.resolve_system(
+                request.system, request.db_type, request.database
+            )
+            if request.system or request.db_type or request.database
+            else REPORTING_SYSTEM
         )
 
         # ==============================================================
@@ -261,31 +268,25 @@ class LineageService:
                 trace.id
             )
 
-            # Find all exact nodes in the requested system that were
-            # previously discovered but could not be walked because the
-            # system was disconnected.
+            # Find every node the previous walk had to park because its
+            # system was disconnected. The request's system target is only
+            # a hint: the service resumes whatever is connected now, so a
+            # request that names the origin (or nothing at all) still
+            # advances the trace.
             resume_points = _resume_points(
-                existing_hops,
-                system_name,
+                existing_hops
             )
-
-            if not resume_points:
-                raise TraceError(
-                    f"No pending lineage node was found for system "
-                    f"'{system_name}' in trace '{trace.id}'. "
-                    "The system may already have been traced, or it is "
-                    "not referenced by the existing lineage."
-                )
 
             walk = _Walk(
                 trace_id=trace.id,
                 origin_system=trace.origin_system,
             )
 
-            # Resume every pending branch belonging to this system.
+            # Resume every pending node that is connectable now.
             #
-            # This is important because one system may be referenced by
-            # multiple branches.
+            # ``_walk`` parks any node whose system is still disconnected,
+            # so walking the full list is safe and leaves the trace
+            # unchanged when nothing new is available.
             for resume_point in resume_points:
                 _walk(
                     resume_point.reference,
@@ -437,37 +438,41 @@ class LineageService:
                 }
 
             # ----------------------------------------------------------
-            # Build edges from source references.
+            # Build the edge from the primary source.
+            #
+            # A trace is a single chain, so each hop contributes exactly one
+            # upstream edge. The full published ``hop.sources`` list is still
+            # available through GET /lineage/trace/{trace_id}.
             # ----------------------------------------------------------
 
-            for source in hop.sources or []:
-                if not source:
+            primary = hop.source_from or (
+                hop.sources[0] if hop.sources else None
+            )
+
+            if not primary:
+                continue
+
+            try:
+                targets, _unparsed = parse_sources(
+                    (primary,)
+                )
+            except (IndexError, ValueError, TypeError):
+                # Bad metadata should not break the graph endpoint.
+                continue
+
+            for upstream in targets:
+                if not upstream.node_id:
                     continue
 
-                try:
-                    targets, _unparsed = parse_sources(
-                        (source,)
-                    )
-                except (IndexError, ValueError, TypeError):
-                    # Bad metadata should not break the graph endpoint.
-                    #
-                    # The original source is still available through
-                    # hop.sources in GET /lineage/trace/{trace_id}.
-                    continue
+                edge_id = (
+                    f"{upstream.node_id}->{identifier}"
+                )
 
-                for upstream in targets:
-                    if not upstream.node_id:
-                        continue
-
-                    edge_id = (
-                        f"{upstream.node_id}->{identifier}"
-                    )
-
-                    edges[edge_id] = GraphEdge(
-                        id=edge_id,
-                        source=upstream.node_id,
-                        target=identifier,
-                    )
+                edges[edge_id] = GraphEdge(
+                    id=edge_id,
+                    source=upstream.node_id,
+                    target=identifier,
+                )
 
         # --------------------------------------------------------------
         # Add upstream nodes that are referenced by an edge but have not
@@ -583,23 +588,21 @@ def _start_new_trace(
 
 def _resume_points(
     hops: list[TraceHop],
-    system: str,
+    system: str | None = None,
 ) -> list[_ResumePoint]:
-    """Find all pending nodes for a system from an existing trace.
+    """Find pending nodes from an existing trace that can be resumed.
 
-    A hop may contain multiple source references.
+    A trace follows a single chain, so only each hop's primary source
+    (``source_from``) is a possible resume point.
 
     Example:
 
         sa_engine.calc_sa_exposure.exposure_value
-            sources:
-                - dwh.mart_sa_exposure.off_bal_eur
-                - staging.customer_allocated_value.value
+            source_from: dwh.mart_sa_exposure.off_bal_eur
 
-    If DWH is connected, the DWH node can be walked.
-
-    If staging is subsequently connected, the staging node can also be
-    walked.
+    When ``system`` is given it filters the points to that system. When it
+    is ``None`` every pending node is returned, so a resume can continue
+    whatever is connected now without naming the system.
 
     The existing branch path is preserved so resumed hops remain part of
     the original lineage path.
@@ -618,11 +621,15 @@ def _resume_points(
     }
 
     for hop in hops:
-        if not hop.sources:
+        primary = hop.source_from or (
+            hop.sources[0] if hop.sources else None
+        )
+
+        if not primary:
             continue
 
         targets, _unparsed = parse_sources(
-            tuple(hop.sources)
+            (primary,)
         )
 
         # The current hop's branch path already contains the current node.
@@ -631,7 +638,7 @@ def _resume_points(
         )
 
         for target in targets:
-            if target.system != system:
+            if system is not None and target.system != system:
                 continue
 
             # If the exact target has already been persisted as a hop,
@@ -853,17 +860,22 @@ def _walk(
             continue
 
         # --------------------------------------------------------------
-        # Follow upstream sources
+        # Follow the primary upstream source
+        #
+        # An attribute can publish several inputs, but a trace follows the
+        # single chain of the selected datapoint. ``source_from`` (the first
+        # published source) is that chain; the remaining sources stay visible
+        # on the hop as informational metadata only.
         # --------------------------------------------------------------
 
         targets, _unparsed = parse_sources(
-            record.sources
+            record.sources[:1]
         )
 
-        for target in targets:
+        if targets:
             queue.append(
                 (
-                    target,
+                    targets[0],
                     [
                         *path,
                         identifier,
@@ -940,11 +952,15 @@ def _unconnected_targets(
     pending: list[str] = []
 
     for hop in hops:
-        if not hop.sources:
+        primary = hop.source_from or (
+            hop.sources[0] if hop.sources else None
+        )
+
+        if not primary:
             continue
 
         parsed, _unparsed = parse_sources(
-            tuple(hop.sources)
+            (primary,)
         )
 
         for name in outstanding_systems(

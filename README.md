@@ -75,7 +75,8 @@ curl.exe -X POST http://127.0.0.1:8000/lineage/tables -H "Content-Type: applicat
 # 4. Trace a datapoint, approving each system it stops at, then resume
 curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite","datapoint_id":"<dp id>"}'
 curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"sa_engine.sqlite"}'
-curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"db_type":"sqlite","database":"reporting_db.sqlite","datapoint_id":"<dp id>","trace_id":"<trace id>"}'
+# Resume with just the trace: the tracer auto-continues whatever is connected now
+curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"datapoint_id":"<dp id>","trace_id":"<trace id>"}'
 
 # 5. Render the result
 curl.exe http://127.0.0.1:8000/lineage/trace/<trace id>/graph
@@ -100,16 +101,20 @@ exposure 1240.50 = off balance 1100.00 + allocated collateral 140.50
 off balance 1100.00 = undrawn 500.00 + drawn 600.00
 ```
 
-So one datapoint fans out into a branching graph with three systems of record:
+So each datapoint is traced along a single chain to one system of record. At
+every hop the tracer follows the primary input (`source_from`), never fanning
+out, so the exposure datapoint resolves as:
 
 ```
 reporting_db.c0700_facts.value                    (reported 1240.50)
 └─ sa_engine.calc_sa_exposure.exposure_value
-   ├─ dwh.mart_sa_exposure.off_bal_eur
-   │  ├─ dwh.dw_exposure.undrawn_eur ─ staging ─ loans_db.facility.undrawn_balance
-   │  └─ dwh.dw_exposure.drawn_eur   ─ staging ─ loans_db.facility.drawn_balance
-   └─ dwh.dw_collateral_alloc.allocated_value ─ staging ─ collateral_db.collateral.market_value
+   └─ dwh.mart_sa_exposure.off_bal_eur
+      └─ dwh.dw_exposure.undrawn_eur ─ staging ─ loans_db.facility.undrawn_balance
 ```
+
+The other inputs the same attributes publish (`dwh.dw_collateral_alloc.
+allocated_value`, `dwh.dw_exposure.drawn_eur`) are returned as metadata but are
+not walked.
 
 `reporting_db` also holds a `c0800_facts` column with no published lineage, used
 to exercise the "no metadata" path.
@@ -136,8 +141,8 @@ without them returns `AMBIGUOUS_METADATA` rather than guessing.
 ["dwh.mart_sa_exposure.off_bal_eur", "dwh.dw_collateral_alloc.allocated_value"]
 ```
 
-The first entry is also returned as `source_from`, for clients that only handle
-one input.
+The tracer walks the first entry (`source_from`) and treats the rest as
+informational metadata, so a trace is always a single chain.
 
 ## Endpoints
 
@@ -203,7 +208,11 @@ are sent, which keeps older requests and explicit overrides working.
 
 `system` may be sent instead of `db_type` + `database` (see
 [Identifying a system](#identifying-a-system)). `trace_id` is only needed to
-resume. The response reports what the tracer could reach and what it needs next:
+resume. On resume the target is optional: the tracer follows the stored lineage
+and continues every pending node whose system is connected now, so resuming with
+just `trace_id` + `datapoint_id` advances the trace. Resuming when nothing is
+pending returns the trace unchanged instead of failing. The response reports
+what the tracer could reach and what it needs next:
 
 ```json
 {
@@ -216,12 +225,12 @@ resume. The response reports what the tracer could reach and what it needs next:
 }
 ```
 
-`status` is `COMPLETED` once every branch has reached a system of record.
+`status` is `COMPLETED` once the chain has reached a system of record.
 `CONNECTION_REQUIRED` means the trace is resumable as-is. `METADATA_NOT_FOUND`
 means a system is connected but publishes nothing for a column it should.
 
-Each hop carries the `branch_path` it was reached by, so a column that appears
-on two branches is reported on both rather than collapsed into one.
+Each hop carries the `branch_path` it was reached by. A trace is a single
+chain, so every hop has a distinct path from the datapoint to the source.
 
 ### Graph output
 
@@ -237,8 +246,8 @@ uv run pytest
 
 The suite runs fully offline against temporary copies of the seeded databases.
 It covers the PDF round trip, connection gating and revocation, identifier
-safety, ambiguity handling, the branching trace, resumption one connection at a
-time, and the graph projection.
+safety, ambiguity handling, the single-chain trace, resumption one connection at
+a time, and the graph projection.
 
 ## Layout
 

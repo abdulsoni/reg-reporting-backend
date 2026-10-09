@@ -1,8 +1,7 @@
 """Read and write access to lineage traces and their hops.
 
-A trace is a tree: every hop records the path of nodes that led to it, so a
-branching lineage stores each node once per path it appears on and the lineage
-graph is a pure projection of the hop table.
+A trace is a single chain: every hop records the path of nodes that led to it,
+so the lineage graph is a pure projection of the hop table.
 """
 
 import json

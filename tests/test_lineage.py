@@ -2,15 +2,19 @@
 
 ALL_SYSTEMS = ("reporting_db", "sa_engine", "dwh", "staging", "loans_db", "collateral_db")
 
+# A datapoint follows a single chain, so only one system of record is reached.
 EXPECTED_FINAL_SOURCES = {
-    "collateral_db.collateral.market_value",
-    "loans_db.facility.drawn_balance",
     "loans_db.facility.undrawn_balance",
 }
 
 
-def start_trace(client, datapoint, trace_id: str | None = None) -> dict:
-    payload = {"system": "reporting_db", "datapoint_id": datapoint["id"]}
+def start_trace(
+    client,
+    datapoint,
+    trace_id: str | None = None,
+    system: str = "reporting_db",
+) -> dict:
+    payload = {"system": system, "datapoint_id": datapoint["id"]}
     if trace_id:
         payload["trace_id"] = trace_id
     response = client.post("/lineage/trace", json=payload)
@@ -98,30 +102,82 @@ def test_a_trace_resumes_as_each_connection_is_granted(client, connect, exposure
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
 
     growth = []
-    for system in ("sa_engine", "dwh", "staging", "loans_db", "collateral_db"):
+    for system in ("sa_engine", "dwh", "staging", "loans_db"):
         connect(system)
-        body = start_trace(client, exposure_datapoint, trace_id)
+        body = start_trace(client, exposure_datapoint, trace_id, system=system)
         growth.append((body["status"], len(body["hops"])))
 
     assert growth == [
         ("CONNECTION_REQUIRED", 2),
-        ("CONNECTION_REQUIRED", 6),
-        ("CONNECTION_REQUIRED", 9),
-        # The collateral branch stops at staging until collateral_db is granted.
-        ("CONNECTION_REQUIRED", 11),
-        ("COMPLETED", 12),
+        # dwh resolves two same-system hops before staging is needed.
+        ("CONNECTION_REQUIRED", 4),
+        ("CONNECTION_REQUIRED", 5),
+        ("COMPLETED", 6),
     ]
     assert set(body["final_sources"]) == EXPECTED_FINAL_SOURCES
     assert body["pending_systems"] == []
 
 
+def test_resume_continues_even_when_it_names_the_origin_system(
+    client, connect, exposure_datapoint
+) -> None:
+    connect("reporting_db")
+    trace_id = start_trace(client, exposure_datapoint)["trace_id"]
+
+    # The newly connected system is sa_engine, but the request names the
+    # origin. Resume has to follow the stored lineage, not the named system.
+    connect("sa_engine")
+    body = start_trace(client, exposure_datapoint, trace_id, system="reporting_db")
+
+    assert len(body["hops"]) == 2
+    assert body["hops"][1]["system"] == "sa_engine"
+    assert body["next_system"] == "dwh"
+
+
+def test_resume_continues_without_a_system_target(
+    client, connect, exposure_datapoint
+) -> None:
+    connect("reporting_db")
+    trace_id = start_trace(client, exposure_datapoint)["trace_id"]
+
+    connect("sa_engine")
+    response = client.post(
+        "/lineage/trace",
+        json={"datapoint_id": exposure_datapoint["id"], "trace_id": trace_id},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["hops"]) == 2
+    assert body["hops"][1]["system"] == "sa_engine"
+
+
+def test_resume_with_nothing_pending_is_idempotent(
+    client, connect, exposure_datapoint
+) -> None:
+    connect("reporting_db")
+    trace_id = start_trace(client, exposure_datapoint)["trace_id"]
+
+    # sa_engine is still disconnected, so there is nothing new to resume.
+    body = start_trace(client, exposure_datapoint, trace_id, system="reporting_db")
+
+    assert body["status"] == "CONNECTION_REQUIRED"
+    assert len(body["hops"]) == 1
+    assert body["pending_systems"] == ["sa_engine"]
+    assert body["next_system"] == "sa_engine"
+
+
 def test_a_completed_trace_keeps_the_same_id_across_resumes(
     client, connect, exposure_datapoint
 ) -> None:
-    connect(*ALL_SYSTEMS)
+    connect("reporting_db")
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
 
-    assert start_trace(client, exposure_datapoint, trace_id)["trace_id"] == trace_id
+    for system in ("sa_engine", "dwh", "staging", "loans_db"):
+        connect(system)
+        resumed = start_trace(client, exposure_datapoint, trace_id, system=system)
+        assert resumed["trace_id"] == trace_id
+
     assert client.get(f"/lineage/trace/{trace_id}").json()["status"] == "COMPLETED"
 
 
@@ -133,34 +189,31 @@ def test_a_full_trace_walks_the_reconciled_lineage(client, connect, exposure_dat
         (hop["system"], hop["table_name"], hop["attribute_name"]) for hop in body["hops"]
     }
 
-    assert ("reporting_db", "c0700_facts", "value") in reached
-    assert ("sa_engine", "calc_sa_exposure", "exposure_value") in reached
-    # exposure splits into an exposure branch and a collateral branch.
-    assert ("dwh", "mart_sa_exposure", "off_bal_eur") in reached
-    assert ("dwh", "dw_collateral_alloc", "allocated_value") in reached
-    # off balance splits again into drawn and undrawn.
-    assert ("dwh", "dw_exposure", "drawn_eur") in reached
-    assert ("dwh", "dw_exposure", "undrawn_eur") in reached
-    assert ("loans_db", "facility", "drawn_balance") in reached
-    assert ("loans_db", "facility", "undrawn_balance") in reached
-    assert ("collateral_db", "collateral", "market_value") in reached
+    assert reached == {
+        ("reporting_db", "c0700_facts", "value"),
+        ("sa_engine", "calc_sa_exposure", "exposure_value"),
+        ("dwh", "mart_sa_exposure", "off_bal_eur"),
+        ("dwh", "dw_exposure", "undrawn_eur"),
+        ("staging", "stg_facilities", "undrawn_balance"),
+        ("loans_db", "facility", "undrawn_balance"),
+    }
+    assert set(body["final_sources"]) == EXPECTED_FINAL_SOURCES
 
 
-def test_the_same_column_on_two_branches_is_traced_on_both(
-    client, connect, exposure_datapoint
-) -> None:
+def test_only_the_primary_source_is_followed(client, connect, exposure_datapoint) -> None:
     connect(*ALL_SYSTEMS)
 
     body = start_trace(client, exposure_datapoint)
-    undrawn = [
-        hop for hop in body["hops"] if hop["attribute_name"] == "undrawn_eur"
-    ]
+    reached = {
+        (hop["system"], hop["table_name"], hop["attribute_name"]) for hop in body["hops"]
+    }
 
-    # Every hop records the route that reached it, so the same node reached
-    # along two branches keeps both branch paths instead of collapsing into one.
-    assert len({hop["branch_path"] for hop in body["hops"]}) == len(body["hops"])
-    assert all(hop["branch_path"].startswith("|reporting_db.c0700_facts.value|") for hop in undrawn)
-    assert len({hop["consumed_by"] for hop in undrawn}) == 1
+    # The other inputs published by the same attributes stay informational and
+    # are not walked, so the trace never reaches the collateral system.
+    assert ("dwh", "dw_collateral_alloc", "allocated_value") not in reached
+    assert ("dwh", "dw_exposure", "drawn_eur") not in reached
+    assert ("dwh", "dw_exposure", "undrawn_eur") in reached
+    assert ("collateral_db", "collateral", "market_value") not in reached
 
 
 def test_the_context_of_the_datapoint_decides_which_report_row_is_traced(client, connect) -> None:
@@ -195,7 +248,7 @@ def test_hops_are_persisted_as_the_trace_grows(client, connect, exposure_datapoi
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
 
     client.post("/lineage/connect", json={"system": "dwh"})
-    start_trace(client, exposure_datapoint, trace_id)
+    start_trace(client, exposure_datapoint, trace_id, system="dwh")
 
     hops = client.get(f"/lineage/trace/{trace_id}/hops").json()
     stored = client.get(f"/lineage/trace/{trace_id}").json()["hops"]
@@ -228,16 +281,13 @@ def test_the_graph_is_shaped_for_react_flow(client, connect, exposure_datapoint)
     assert {node["id"] for node in final} == EXPECTED_FINAL_SOURCES
 
 
-def test_a_graph_for_a_trace_with_no_hops_is_refused(client, connect, exposure_datapoint) -> None:
-    connect("reporting_db")
+def test_a_graph_for_a_trace_with_no_hops_is_refused(client, exposure_datapoint) -> None:
+    # reporting_db is not connected, so the walk cannot store a single hop.
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
-    client.delete("/lineage/connections/reporting_db")
 
-    assert start_trace(client, exposure_datapoint, trace_id)["hops"] == []
     response = client.get(f"/lineage/trace/{trace_id}/graph")
 
-    # The hop from the first trace is still stored, so the graph still renders.
-    assert response.status_code == 200
+    assert response.status_code == 400
 
 
 def test_explore_accepts_a_db_type_and_database_target(client) -> None:
