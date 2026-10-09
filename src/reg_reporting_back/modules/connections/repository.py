@@ -12,7 +12,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from ...core.database import create_schema, session
+from ...core.database import session
 
 # Stored alongside the target so a stored connection can be reopened. `password`
 # is deliberately absent: credentials are never written to disk.
@@ -56,7 +56,6 @@ class ConnectionRepository:
 
     @staticmethod
     def list_all() -> list[SystemConnection]:
-        create_schema()
         with session() as conn:
             rows = conn.execute(
                 text(
@@ -96,7 +95,6 @@ class ConnectionRepository:
     ) -> SystemConnection:
         """Insert or update a system connection, leaving it connected."""
 
-        create_schema()
         safe_params = {key: value for key, value in (params or {}).items() if value is not None}
 
         with session() as conn:
@@ -131,7 +129,6 @@ class ConnectionRepository:
     def disconnect(system_name: str) -> bool:
         """Mark a system as not connected. Returns True when it existed."""
 
-        create_schema()
         with session() as conn:
             result = conn.execute(
                 text(
@@ -149,6 +146,5 @@ class ConnectionRepository:
     def reset() -> None:
         """Forget every registered connection."""
 
-        create_schema()
         with session() as conn:
             conn.execute(text("DELETE FROM system_connections"))

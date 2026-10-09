@@ -1,7 +1,7 @@
 """Read and write access to lineage traces and their hops.
 
-A trace is a single chain: every hop records the path of nodes that led to it,
-so the lineage graph is a pure projection of the hop table.
+A trace is a dependency graph: every hop records the path of nodes that led to
+it, so the lineage graph is a pure projection of the hop table.
 """
 
 import json
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 
-from ...core.database import create_schema, session
+from ...core.database import session
 from .schema import (
     SOURCE_REACHED,
     TraceHop,
@@ -62,7 +62,6 @@ class TraceRepository:
 
     @staticmethod
     def create(report_id: str | None, datapoint_id: str | None, origin_system: str) -> Trace:
-        create_schema()
         trace_id = new_id("trace")
         now = utc_now()
 
@@ -96,7 +95,6 @@ class TraceRepository:
 
     @staticmethod
     def get(trace_id: str) -> Trace | None:
-        create_schema()
         with session() as conn:
             row = conn.execute(
                 text(
@@ -160,7 +158,6 @@ class TraceRepository:
 
     @staticmethod
     def get_hops(trace_id: str) -> list[TraceHop]:
-        create_schema()
         with session() as conn:
             rows = conn.execute(
                 text(

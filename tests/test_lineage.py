@@ -2,9 +2,12 @@
 
 ALL_SYSTEMS = ("reporting_db", "sa_engine", "dwh", "staging", "loans_db", "collateral_db")
 
-# A datapoint follows a single chain, so only one system of record is reached.
+# A datapoint follows every dependency, so three systems of record are reached:
+# the drawn and undrawn facility balances and the allocated collateral.
 EXPECTED_FINAL_SOURCES = {
     "loans_db.facility.undrawn_balance",
+    "loans_db.facility.drawn_balance",
+    "collateral_db.collateral.market_value",
 }
 
 
@@ -102,17 +105,21 @@ def test_a_trace_resumes_as_each_connection_is_granted(client, connect, exposure
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
 
     growth = []
-    for system in ("sa_engine", "dwh", "staging", "loans_db"):
+    for system in ("sa_engine", "dwh", "staging", "loans_db", "collateral_db"):
         connect(system)
         body = start_trace(client, exposure_datapoint, trace_id, system=system)
         growth.append((body["status"], len(body["hops"])))
 
     assert growth == [
         ("CONNECTION_REQUIRED", 2),
-        # dwh resolves two same-system hops before staging is needed.
-        ("CONNECTION_REQUIRED", 4),
-        ("CONNECTION_REQUIRED", 5),
-        ("COMPLETED", 6),
+        # dwh resolves both inputs of exposure_value and both inputs of
+        # off_bal_eur before staging is needed.
+        ("CONNECTION_REQUIRED", 6),
+        ("CONNECTION_REQUIRED", 9),
+        # loans_db resolves the drawn and undrawn sources; collateral_db is
+        # still blocking the allocated-value branch.
+        ("CONNECTION_REQUIRED", 11),
+        ("COMPLETED", 12),
     ]
     assert set(body["final_sources"]) == EXPECTED_FINAL_SOURCES
     assert body["pending_systems"] == []
@@ -173,7 +180,7 @@ def test_a_completed_trace_keeps_the_same_id_across_resumes(
     connect("reporting_db")
     trace_id = start_trace(client, exposure_datapoint)["trace_id"]
 
-    for system in ("sa_engine", "dwh", "staging", "loans_db"):
+    for system in ("sa_engine", "dwh", "staging", "loans_db", "collateral_db"):
         connect(system)
         resumed = start_trace(client, exposure_datapoint, trace_id, system=system)
         assert resumed["trace_id"] == trace_id
@@ -193,14 +200,22 @@ def test_a_full_trace_walks_the_reconciled_lineage(client, connect, exposure_dat
         ("reporting_db", "c0700_facts", "value"),
         ("sa_engine", "calc_sa_exposure", "exposure_value"),
         ("dwh", "mart_sa_exposure", "off_bal_eur"),
+        ("dwh", "dw_collateral_alloc", "allocated_value"),
         ("dwh", "dw_exposure", "undrawn_eur"),
+        ("dwh", "dw_exposure", "drawn_eur"),
         ("staging", "stg_facilities", "undrawn_balance"),
+        ("staging", "stg_facilities", "drawn_balance"),
+        ("staging", "stg_collateral", "market_value"),
         ("loans_db", "facility", "undrawn_balance"),
+        ("loans_db", "facility", "drawn_balance"),
+        ("collateral_db", "collateral", "market_value"),
     }
     assert set(body["final_sources"]) == EXPECTED_FINAL_SOURCES
 
 
-def test_only_the_primary_source_is_followed(client, connect, exposure_datapoint) -> None:
+def test_every_dependency_in_a_transformation_is_followed(
+    client, connect, exposure_datapoint
+) -> None:
     connect(*ALL_SYSTEMS)
 
     body = start_trace(client, exposure_datapoint)
@@ -208,12 +223,24 @@ def test_only_the_primary_source_is_followed(client, connect, exposure_datapoint
         (hop["system"], hop["table_name"], hop["attribute_name"]) for hop in body["hops"]
     }
 
-    # The other inputs published by the same attributes stay informational and
-    # are not walked, so the trace never reaches the collateral system.
-    assert ("dwh", "dw_collateral_alloc", "allocated_value") not in reached
-    assert ("dwh", "dw_exposure", "drawn_eur") not in reached
+    # Branch A: off_bal_eur -> undrawn_eur -> stg_facilities.undrawn_balance
     assert ("dwh", "dw_exposure", "undrawn_eur") in reached
-    assert ("collateral_db", "collateral", "market_value") not in reached
+    assert ("staging", "stg_facilities", "undrawn_balance") in reached
+    assert ("loans_db", "facility", "undrawn_balance") in reached
+
+    # off_bal_eur also depends on drawn_eur.
+    assert ("dwh", "dw_exposure", "drawn_eur") in reached
+    assert ("staging", "stg_facilities", "drawn_balance") in reached
+    assert ("loans_db", "facility", "drawn_balance") in reached
+
+    # Branch B: allocated_value -> stg_collateral.market_value -> collateral_db.
+    assert ("dwh", "dw_collateral_alloc", "allocated_value") in reached
+    assert ("staging", "stg_collateral", "market_value") in reached
+    assert ("collateral_db", "collateral", "market_value") in reached
+
+    # A datapoint-unrelated column of the same systems never appears.
+    assert ("sa_engine", "calc_sa_exposure", "drawn_value") not in reached
+    assert ("sa_engine", "calc_sa_exposure", "undrawn_value") not in reached
 
 
 def test_the_context_of_the_datapoint_decides_which_report_row_is_traced(client, connect) -> None:

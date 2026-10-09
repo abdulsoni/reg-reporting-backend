@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text
 
-from ...core.database import create_schema, session
+from ...core.database import session
 
 REPORT_COLUMNS = """
     id, file_name, report_type, reporting_entity, reporting_date,
@@ -52,7 +52,6 @@ class ReportRepository:
 
     @staticmethod
     def create(report: Report, raw_json: str | None, pdf_bytes: bytes | None) -> Report:
-        create_schema()
         with session() as conn:
             conn.execute(
                 text(
@@ -84,7 +83,6 @@ class ReportRepository:
 
     @staticmethod
     def list_all() -> list[Report]:
-        create_schema()
         with session() as conn:
             rows = conn.execute(
                 text(f"SELECT {REPORT_COLUMNS} FROM reports ORDER BY created_at DESC, id")
@@ -93,7 +91,6 @@ class ReportRepository:
 
     @staticmethod
     def get(report_id: str) -> Report | None:
-        create_schema()
         with session() as conn:
             row = conn.execute(
                 text(f"SELECT {REPORT_COLUMNS} FROM reports WHERE id = :id"),
@@ -103,7 +100,6 @@ class ReportRepository:
 
     @staticmethod
     def get_raw(report_id: str) -> str | None:
-        create_schema()
         with session() as conn:
             row = conn.execute(
                 text("SELECT raw_json FROM reports WHERE id = :id"),
@@ -113,7 +109,6 @@ class ReportRepository:
 
     @staticmethod
     def get_pdf(report_id: str) -> bytes | None:
-        create_schema()
         with session() as conn:
             row = conn.execute(
                 text("SELECT pdf_bytes FROM reports WHERE id = :id"),
@@ -136,7 +131,6 @@ class ReportRepository:
         if not datapoints:
             return
 
-        create_schema()
         with session() as conn:
             conn.execute(
                 text(
@@ -167,7 +161,6 @@ class ReportRepository:
 
     @staticmethod
     def get_datapoints(report_id: str) -> list[Datapoint]:
-        create_schema()
         with session() as conn:
             rows = conn.execute(
                 text(
@@ -182,7 +175,6 @@ class ReportRepository:
 
     @staticmethod
     def get_datapoint(datapoint_id: str) -> Datapoint | None:
-        create_schema()
         with session() as conn:
             row = conn.execute(
                 text(

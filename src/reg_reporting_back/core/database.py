@@ -5,6 +5,7 @@ traces and the registry of connected systems. It is never used to reach a
 client system: that always goes through a connection adapter.
 """
 
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import lru_cache
@@ -102,24 +103,43 @@ SCHEMA_MIGRATIONS = (
 
 _ENGINES: dict[str, Engine] = {}
 
+_SCHEMA_LOCK = threading.Lock()
+_schema_ready = False
+
 
 @lru_cache(maxsize=4)
 def _build_engine(url: str) -> Engine:
-    """Build (and memoise) one engine per database URL."""
+    """Build (and memoise) one engine per database URL.
+
+    A file-backed SQLite database must not use ``StaticPool``: that pool hands
+    the *same* DBAPI connection to every thread, so concurrent requests
+    interleave cursors on one connection and corrupt each other's results. The
+    default pool hands each thread its own connection instead, and the busy
+    timeout makes concurrent writers wait rather than fail.
+    """
 
     if not url.startswith("sqlite"):
         engine = create_engine(url, pool_pre_ping=True)
-    else:
+    elif ":memory:" in url:
         engine = create_engine(
             url,
             poolclass=StaticPool,
             connect_args={"check_same_thread": False},
         )
+    else:
+        engine = create_engine(
+            url,
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
+
+    if url.startswith("sqlite"):
 
         @event.listens_for(engine, "connect")
-        def _enable_foreign_keys(dbapi_connection, _record) -> None:
+        def _configure_sqlite(dbapi_connection, _record) -> None:
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA foreign_keys = ON")
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.execute("PRAGMA journal_mode = WAL")
             cursor.close()
 
     _ENGINES[url] = engine
@@ -138,10 +158,12 @@ def get_engine() -> Engine:
 def reset_engines() -> None:
     """Dispose every cached engine. Used by tests and the seed endpoints."""
 
+    global _schema_ready
     for engine in _ENGINES.values():
         engine.dispose()
     _ENGINES.clear()
     _build_engine.cache_clear()
+    _schema_ready = False
 
 
 @contextmanager
@@ -172,13 +194,26 @@ def _apply_migrations(conn: Connection) -> None:
             )
 
 
-def create_schema() -> None:
-    """Create the application database tables if they do not exist yet."""
+def create_schema(*, force: bool = False) -> None:
+    """Create the application database tables if they do not exist yet.
 
-    with session() as conn:
-        for statement in APP_SCHEMA_STATEMENTS:
-            conn.execute(text(statement))
-        _apply_migrations(conn)
+    The call is memoised: after the first successful run the schema is left
+    alone, so the schema statements and migrations are not re-issued on every
+    request (which used to race under concurrent load).
+    """
+
+    global _schema_ready
+    if _schema_ready and not force:
+        return
+
+    with _SCHEMA_LOCK:
+        if _schema_ready and not force:
+            return
+        with session() as conn:
+            for statement in APP_SCHEMA_STATEMENTS:
+                conn.execute(text(statement))
+            _apply_migrations(conn)
+        _schema_ready = True
 
 
 RESET_STATEMENTS = (

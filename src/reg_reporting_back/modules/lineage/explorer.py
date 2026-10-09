@@ -325,10 +325,11 @@ def explore(
             evidence_values=values,
         )
 
-    # A trace follows a single chain, so only the primary source (the first
-    # published input) decides what the UI should do next. The full published
-    # ``sources`` list is still returned below as informational metadata.
-    parsed, unparsed = parse_sources(record.sources[:1])
+    # A transformation can depend on several attributes, so every published
+    # input is considered when deciding what the UI should connect next. The
+    # full published ``sources`` list is returned below, and ``source_from``
+    # keeps naming the first input.
+    parsed, unparsed = parse_sources(record.sources)
 
     pending = outstanding_systems(
         parsed,

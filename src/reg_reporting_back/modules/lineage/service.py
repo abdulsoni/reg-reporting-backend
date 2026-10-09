@@ -1,8 +1,10 @@
 """Lineage service: explore a single attribute, then trace to the source.
 
-The trace is a breadth-first walk over a graph whose nodes are
-``system.table.attribute`` triples and whose edges are the ``source_from``
-relationships each system publishes.
+The trace is a breadth-first walk over a dependency graph whose nodes are
+``system.table.attribute`` triples and whose edges are the published input
+references. A transformation can depend on several attributes, so the walk
+follows every input recursively and deduplicates nodes by their fully
+qualified identity.
 
 There are two trace operations:
 
@@ -10,16 +12,17 @@ There are two trace operations:
    ------------------
    A report datapoint always starts from ``reporting_db``.
 
-       reporting_db
+       reporting_db.c0700_facts.value
             |
             v
-       sa_engine
+       sa_engine.calc_sa_exposure.exposure_value
             |
-            v
-           dwh
+            +-- dwh.mart_sa_exposure.off_bal_eur
+            |        |
+            |        +-- dwh.dw_exposure.undrawn_eur
+            |        +-- dwh.dw_exposure.drawn_eur
             |
-            v
-       source system
+            +-- dwh.dw_collateral_alloc.allocated_value
 
 2. Resume an existing trace
    ------------------------
@@ -31,16 +34,6 @@ There are two trace operations:
    regardless of which system the request names. A request that names no
    system at all still advances the trace.
 
-   Example:
-
-       reporting_db.c0700_facts.value
-                    |
-                    v
-       sa_engine.calc_sa_exposure.exposure_value
-                    |
-                    v
-       dwh.mart_sa_exposure.off_bal_eur
-
    If DWH was previously disconnected, the resume request can simply be:
 
        {
@@ -48,9 +41,9 @@ There are two trace operations:
            "datapoint_id": "..."
        }
 
-   The service discovers ``dwh.mart_sa_exposure.off_bal_eur`` from the
-   stored trace and continues from there. When nothing is left to resume
-   the trace is returned unchanged instead of failing.
+   The service discovers the parked DWH nodes from the stored trace and
+   continues from there. When nothing is left to resume the trace is
+   returned unchanged instead of failing.
 
 The trace only steps into a system the user has already connected. Anything
 else is parked in ``pending_systems`` so the UI can ask for the connection.
@@ -282,6 +275,18 @@ class LineageService:
                 origin_system=trace.origin_system,
             )
 
+            # Treat every node already stored in the trace as visited, so a
+            # resumed branch that joins an existing hop stops there instead
+            # of being persisted a second time under a different path.
+            walk.visited = {
+                node_id(
+                    hop.system,
+                    hop.table_name,
+                    hop.attribute_name,
+                )
+                for hop in existing_hops
+            }
+
             # Resume every pending node that is connectable now.
             #
             # ``_walk`` parks any node whose system is still disconnected,
@@ -438,23 +443,17 @@ class LineageService:
                 }
 
             # ----------------------------------------------------------
-            # Build the edge from the primary source.
+            # Build one edge per published input.
             #
-            # A trace is a single chain, so each hop contributes exactly one
-            # upstream edge. The full published ``hop.sources`` list is still
-            # available through GET /lineage/trace/{trace_id}.
+            # The trace follows every input of a transformation, so each
+            # source of every hop becomes an upstream edge. Inputs that were
+            # not walked (a system still disconnected) become PENDING nodes
+            # in the block below.
             # ----------------------------------------------------------
-
-            primary = hop.source_from or (
-                hop.sources[0] if hop.sources else None
-            )
-
-            if not primary:
-                continue
 
             try:
                 targets, _unparsed = parse_sources(
-                    (primary,)
+                    tuple(hop.sources)
                 )
             except (IndexError, ValueError, TypeError):
                 # Bad metadata should not break the graph endpoint.
@@ -592,13 +591,14 @@ def _resume_points(
 ) -> list[_ResumePoint]:
     """Find pending nodes from an existing trace that can be resumed.
 
-    A trace follows a single chain, so only each hop's primary source
-    (``source_from``) is a possible resume point.
+    Every published input of every hop is a possible resume point, because a
+    hop can depend on several attributes across several systems.
 
     Example:
 
         sa_engine.calc_sa_exposure.exposure_value
-            source_from: dwh.mart_sa_exposure.off_bal_eur
+            sources: dwh.mart_sa_exposure.off_bal_eur
+                     dwh.dw_collateral_alloc.allocated_value
 
     When ``system`` is given it filters the points to that system. When it
     is ``None`` every pending node is returned, so a resume can continue
@@ -621,15 +621,8 @@ def _resume_points(
     }
 
     for hop in hops:
-        primary = hop.source_from or (
-            hop.sources[0] if hop.sources else None
-        )
-
-        if not primary:
-            continue
-
         targets, _unparsed = parse_sources(
-            (primary,)
+            tuple(hop.sources)
         )
 
         # The current hop's branch path already contains the current node.
@@ -718,8 +711,11 @@ def _walk(
     When resuming an existing trace, ``initial_path`` contains the already
     persisted path leading to the node being resumed.
 
-    Cycle detection is per path, not global. The same column reached along
-    two different branches can therefore be resolved independently.
+    Every published input is followed, so the walk builds the full dependency
+    graph behind the datapoint rather than a single chain. ``walk.visited``
+    deduplicates nodes by their fully qualified identity, which both stops a
+    dependency that is shared by several consumers from being recorded twice
+    and prevents cycles.
     """
 
     queue: deque[
@@ -744,6 +740,18 @@ def _walk(
 
         if identifier in path:
             walk.loops += 1
+            continue
+
+        # --------------------------------------------------------------
+        # Deduplicate by fully qualified identity
+        #
+        # A dependency shared by several consumers is resolved once. On a
+        # resume the set is pre-seeded with the nodes already persisted, so
+        # a branch that joins an existing hop stops instead of being stored
+        # again under a different path.
+        # --------------------------------------------------------------
+
+        if identifier in walk.visited:
             continue
 
         # --------------------------------------------------------------
@@ -860,22 +868,22 @@ def _walk(
             continue
 
         # --------------------------------------------------------------
-        # Follow the primary upstream source
+        # Follow every published input
         #
-        # An attribute can publish several inputs, but a trace follows the
-        # single chain of the selected datapoint. ``source_from`` (the first
-        # published source) is that chain; the remaining sources stay visible
-        # on the hop as informational metadata only.
+        # A transformation can depend on several attributes (for example
+        # ``off_bal_eur + allocated_value``). Each input is an explicit
+        # ``system.table.attribute`` reference in the metadata, so the whole
+        # dependency graph is followed rather than only the first input.
         # --------------------------------------------------------------
 
         targets, _unparsed = parse_sources(
-            record.sources[:1]
+            record.sources
         )
 
-        if targets:
+        for target in targets:
             queue.append(
                 (
-                    targets[0],
+                    target,
                     [
                         *path,
                         identifier,
@@ -952,15 +960,8 @@ def _unconnected_targets(
     pending: list[str] = []
 
     for hop in hops:
-        primary = hop.source_from or (
-            hop.sources[0] if hop.sources else None
-        )
-
-        if not primary:
-            continue
-
         parsed, _unparsed = parse_sources(
-            (primary,)
+            tuple(hop.sources)
         )
 
         for name in outstanding_systems(

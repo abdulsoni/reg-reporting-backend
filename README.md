@@ -26,9 +26,11 @@ report PDF ──▶ datapoint ──▶ trace ──▶ lineage graph
    describing where its columns come from. It lives *inside* the system being
    described, so lineage is owned by the system that owns the data.
 4. **Tracing.** The tracer walks `system.table.attribute` nodes along the
-   published `source_from` edges. It only steps into systems that are already
-   connected; anything else is parked in `pending_systems` and reported back, so
-   the UI can ask for the next approval. Passing `trace_id` resumes.
+   published input references. It follows every input of a transformation
+   recursively, so a datapoint resolves to its whole dependency graph. It only
+   steps into systems that are already connected; anything else is parked in
+   `pending_systems` and reported back, so the UI can ask for the next approval.
+   Passing `trace_id` resumes.
 
 Connections and lineage metadata are deliberately separate: connecting a system
 says "you may read this", while its metadata says "this is where the data came
@@ -101,20 +103,22 @@ exposure 1240.50 = off balance 1100.00 + allocated collateral 140.50
 off balance 1100.00 = undrawn 500.00 + drawn 600.00
 ```
 
-So each datapoint is traced along a single chain to one system of record. At
-every hop the tracer follows the primary input (`source_from`), never fanning
-out, so the exposure datapoint resolves as:
+So each datapoint is traced through every input of every transformation until
+each branch reaches a system of record. The exposure datapoint resolves to two
+branches:
 
 ```
 reporting_db.c0700_facts.value                    (reported 1240.50)
 └─ sa_engine.calc_sa_exposure.exposure_value
-   └─ dwh.mart_sa_exposure.off_bal_eur
-      └─ dwh.dw_exposure.undrawn_eur ─ staging ─ loans_db.facility.undrawn_balance
+   ├─ dwh.mart_sa_exposure.off_bal_eur
+   │  ├─ dwh.dw_exposure.undrawn_eur ─ staging ─ loans_db.facility.undrawn_balance
+   │  └─ dwh.dw_exposure.drawn_eur   ─ staging ─ loans_db.facility.drawn_balance
+   └─ dwh.dw_collateral_alloc.allocated_value
+      └─ staging.stg_collateral.market_value ─ collateral_db.collateral.market_value
 ```
 
-The other inputs the same attributes publish (`dwh.dw_collateral_alloc.
-allocated_value`, `dwh.dw_exposure.drawn_eur`) are returned as metadata but are
-not walked.
+Only dependencies of the selected datapoint appear; unrelated columns of the
+same systems are never walked.
 
 `reporting_db` also holds a `c0800_facts` column with no published lineage, used
 to exercise the "no metadata" path.
@@ -141,8 +145,8 @@ without them returns `AMBIGUOUS_METADATA` rather than guessing.
 ["dwh.mart_sa_exposure.off_bal_eur", "dwh.dw_collateral_alloc.allocated_value"]
 ```
 
-The tracer walks the first entry (`source_from`) and treats the rest as
-informational metadata, so a trace is always a single chain.
+The tracer walks every entry, so a column with several inputs produces several
+branches and a trace is the full dependency graph of the datapoint.
 
 ## Endpoints
 
@@ -229,8 +233,8 @@ what the tracer could reach and what it needs next:
 `CONNECTION_REQUIRED` means the trace is resumable as-is. `METADATA_NOT_FOUND`
 means a system is connected but publishes nothing for a column it should.
 
-Each hop carries the `branch_path` it was reached by. A trace is a single
-chain, so every hop has a distinct path from the datapoint to the source.
+Each hop carries the `branch_path` it was reached by. Because a dependency is
+followed once, every hop has a distinct path from the datapoint to the source.
 
 ### Graph output
 
@@ -246,8 +250,8 @@ uv run pytest
 
 The suite runs fully offline against temporary copies of the seeded databases.
 It covers the PDF round trip, connection gating and revocation, identifier
-safety, ambiguity handling, the single-chain trace, resumption one connection at
-a time, and the graph projection.
+safety, ambiguity handling, the dependency-graph trace, resumption one connection
+at a time, and the graph projection.
 
 ## Layout
 
