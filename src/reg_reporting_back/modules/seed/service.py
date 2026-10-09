@@ -9,6 +9,14 @@ The values in the fixture reconcile end to end:
 
     exposure_value 1240.50 = off_bal_eur 1100.00 + allocated_value 140.50
     off_bal_eur    1100.00 = undrawn_eur  500.00 + drawn_eur      600.00
+
+Scenario B (normalized sensitivity) mostly reconciles:
+
+    adjusted_local 460.23 = original_local 500.25 + approved_adjustment_local -40.02
+    normalized_usd   4.60 = adjusted_local 460.23 * fx_rate 0.01
+
+NORM-SENS-00005 is the deliberate exception: the sheet publishes 3.18 while
+the formula produces 4.6023, so the trace can demonstrate a flagged mismatch.
 """
 
 import json
@@ -70,6 +78,72 @@ CREATE TABLE {name} (
 """
 
 COLLATERAL_COLUMNS = ("collateral_id", "market_value", "currency")
+
+NORMALIZED_SENSITIVITY_DDL = """
+CREATE TABLE {name} (
+    normalized_id TEXT PRIMARY KEY,
+    trade_id TEXT NOT NULL,
+    sensitivity_type TEXT NOT NULL,
+    sensitivity_id TEXT NOT NULL,
+    original_local REAL NOT NULL,
+    approved_adjustment_local REAL NOT NULL,
+    adjusted_local REAL NOT NULL,
+    fx_rate REAL NOT NULL,
+    normalized_usd REAL NOT NULL,
+    currency TEXT NOT NULL
+)
+"""
+
+NORMALIZED_SENSITIVITY_COLUMNS = (
+    "normalized_id",
+    "trade_id",
+    "sensitivity_type",
+    "sensitivity_id",
+    "original_local",
+    "approved_adjustment_local",
+    "adjusted_local",
+    "fx_rate",
+    "normalized_usd",
+    "currency",
+)
+
+ADJUSTMENTS_DDL = """
+CREATE TABLE {name} (
+    adjustment_id TEXT PRIMARY KEY,
+    sensitivity_id TEXT NOT NULL,
+    adjustment_amount_local REAL NOT NULL,
+    approval_status TEXT NOT NULL,
+    currency TEXT NOT NULL
+)
+"""
+
+ADJUSTMENTS_COLUMNS = (
+    "adjustment_id",
+    "sensitivity_id",
+    "adjustment_amount_local",
+    "approval_status",
+    "currency",
+)
+
+RAW_SENSITIVITY_DDL = """
+CREATE TABLE {name} (
+    sensitivity_id TEXT PRIMARY KEY,
+    sensitivity_local REAL NOT NULL,
+    currency TEXT NOT NULL
+)
+"""
+
+RAW_SENSITIVITY_COLUMNS = ("sensitivity_id", "sensitivity_local", "currency")
+
+FX_RATES_DDL = """
+CREATE TABLE {name} (
+    fx_rate_id TEXT PRIMARY KEY,
+    currency TEXT NOT NULL,
+    fx_rate REAL NOT NULL
+)
+"""
+
+FX_RATES_COLUMNS = ("fx_rate_id", "currency", "fx_rate")
 
 LINEAGE_METADATA_DDL = """
 CREATE TABLE lineage_metadata (
@@ -154,6 +228,32 @@ def _balances(name: str, rows: Sequence[tuple]) -> TableFixture:
 
 def _collateral(name: str, rows: Sequence[tuple]) -> TableFixture:
     return TableFixture(name, COLLATERAL_DDL.format(name=name), COLLATERAL_COLUMNS, tuple(rows))
+
+
+def _normalized_sensitivity(name: str, rows: Sequence[tuple]) -> TableFixture:
+    return TableFixture(
+        name,
+        NORMALIZED_SENSITIVITY_DDL.format(name=name),
+        NORMALIZED_SENSITIVITY_COLUMNS,
+        tuple(rows),
+    )
+
+
+def _adjustments(name: str, rows: Sequence[tuple]) -> TableFixture:
+    return TableFixture(name, ADJUSTMENTS_DDL.format(name=name), ADJUSTMENTS_COLUMNS, tuple(rows))
+
+
+def _raw_sensitivity(name: str, rows: Sequence[tuple]) -> TableFixture:
+    return TableFixture(
+        name,
+        RAW_SENSITIVITY_DDL.format(name=name),
+        RAW_SENSITIVITY_COLUMNS,
+        tuple(rows),
+    )
+
+
+def _fx_rates(name: str, rows: Sequence[tuple]) -> TableFixture:
+    return TableFixture(name, FX_RATES_DDL.format(name=name), FX_RATES_COLUMNS, tuple(rows))
 
 
 FIXTURES: dict[str, SystemFixture] = {
@@ -405,6 +505,154 @@ FIXTURES: dict[str, SystemFixture] = {
                 attribute_name="market_value",
                 sources=(),
                 consumed_by="staging.stg_collateral.market_value",
+            ),
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # Scenario B: normalized sensitivity
+    #
+    # normalized_usd = adjusted_local * fx_rate
+    # adjusted_local = original_local + approved_adjustment_local
+    #
+    # Every row but NORM-SENS-00005 reconciles exactly. NORM-SENS-00005 keeps
+    # the value published on the sheet (3.18) even though the declared formula
+    # produces 460.23 * 0.01 = 4.6023; the trace flags the mismatch instead of
+    # rewriting the reported figure.
+    # Join/filter keys (sensitivity_id, fx_rate_id) are context, not nodes, but
+    # the approval gate is published as a real dependency of the adjustment.
+    # ------------------------------------------------------------------
+    "normalized_db": SystemFixture(
+        definition=SYSTEMS["normalized_db"],
+        tables=(
+            _normalized_sensitivity(
+                "normalized_sensitivity",
+                (
+                    ("NORM-SENS-00001", "TRD-0001", "DELTA", "SENS-00001",
+                     40612.02, -40.02, 40572.00, 0.01, 405.72, "EUR"),
+                    ("NORM-SENS-00002", "TRD-0002", "DELTA", "SENS-00002",
+                     56239.02, -40.02, 56199.00, 0.01, 561.99, "EUR"),
+                    ("NORM-SENS-00003", "TRD-0002", "VEGA", "SENS-00003",
+                     3787.02, -40.02, 3747.00, 0.01, 37.47, "EUR"),
+                    ("NORM-SENS-00004", "TRD-0002", "CURVATURE", "SENS-00004",
+                     789.02, -40.02, 749.00, 0.01, 7.49, "EUR"),
+                    ("NORM-SENS-00005", "TRD-0003", "DELTA", "SENS-00005",
+                     500.25, -40.02, 460.23, 0.01, 3.18, "EUR"),
+                    ("NORM-SENS-00006", "TRD-0003", "VEGA", "SENS-00006",
+                     63.02, -40.02, 23.00, 0.01, 0.23, "EUR"),
+                    ("NORM-SENS-00007", "TRD-0003", "CURVATURE", "SENS-00007",
+                     45.02, -40.02, 5.00, 0.01, 0.05, "EUR"),
+                    ("NORM-SENS-00008", "TRD-0004", "DELTA", "SENS-00008",
+                     72040.02, -40.02, 72000.00, 0.01, 720.00, "EUR"),
+                    ("NORM-SENS-00009", "TRD-0005", "DELTA", "SENS-00009",
+                     65665.02, -40.02, 65625.00, 0.01, 656.25, "EUR"),
+                    ("NORM-SENS-00010", "TRD-0006", "DELTA", "SENS-00010",
+                     83032.02, -40.02, 82992.00, 0.01, 829.92, "EUR"),
+                ),
+            ),
+        ),
+        metadata=(
+            MetadataRow(
+                table_name="normalized_sensitivity",
+                attribute_name="normalized_usd",
+                sources=(
+                    "normalized_db.normalized_sensitivity.adjusted_local",
+                    "fx_reference.fx_rates.fx_rate",
+                ),
+                transformation="adjusted_local * fx_rate",
+                consumed_by="normalized sensitivity sheet",
+            ),
+            MetadataRow(
+                table_name="normalized_sensitivity",
+                attribute_name="adjusted_local",
+                sources=(
+                    "raw_sensitivity.raw_sensitivity.sensitivity_local",
+                    "adjustment_db.adjustments.adjustment_amount_local",
+                ),
+                transformation="original_local + approved_adjustment_local",
+                consumed_by="normalized_db.normalized_sensitivity.normalized_usd",
+            ),
+        ),
+    ),
+    "adjustment_db": SystemFixture(
+        definition=SYSTEMS["adjustment_db"],
+        tables=(
+            _adjustments(
+                "adjustments",
+                (
+                    ("ADJ-00001", "SENS-00001", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00002", "SENS-00002", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00003", "SENS-00003", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00004", "SENS-00004", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00005", "SENS-00005", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00006", "SENS-00006", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00007", "SENS-00007", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00008", "SENS-00008", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00009", "SENS-00009", -40.02, "APPROVED", "EUR"),
+                    ("ADJ-00010", "SENS-00010", -40.02, "APPROVED", "EUR"),
+                ),
+            ),
+        ),
+        metadata=(
+            MetadataRow(
+                table_name="adjustments",
+                attribute_name="adjustment_amount_local",
+                sources=("adjustment_db.adjustments.approval_status",),
+                transformation="Apply adjustment only when approval_status = APPROVED",
+                consumed_by="normalized_db.normalized_sensitivity.adjusted_local",
+            ),
+            MetadataRow(
+                table_name="adjustments",
+                attribute_name="approval_status",
+                sources=(),
+                transformation="Approved adjustment record",
+                consumed_by="normalized_db.normalized_sensitivity.adjusted_local",
+            ),
+        ),
+    ),
+    "raw_sensitivity": SystemFixture(
+        definition=SYSTEMS["raw_sensitivity"],
+        tables=(
+            _raw_sensitivity(
+                "raw_sensitivity",
+                (
+                    ("SENS-00001", 40612.02, "EUR"),
+                    ("SENS-00002", 56239.02, "EUR"),
+                    ("SENS-00003", 3787.02, "EUR"),
+                    ("SENS-00004", 789.02, "EUR"),
+                    ("SENS-00005", 500.25, "EUR"),
+                    ("SENS-00006", 63.02, "EUR"),
+                    ("SENS-00007", 45.02, "EUR"),
+                    ("SENS-00008", 72040.02, "EUR"),
+                    ("SENS-00009", 65665.02, "EUR"),
+                    ("SENS-00010", 83032.02, "EUR"),
+                ),
+            ),
+        ),
+        metadata=(
+            MetadataRow(
+                table_name="raw_sensitivity",
+                attribute_name="sensitivity_local",
+                sources=(),
+                transformation="Original reported value",
+                consumed_by="normalized_db.normalized_sensitivity.adjusted_local",
+            ),
+        ),
+    ),
+    "fx_reference": SystemFixture(
+        definition=SYSTEMS["fx_reference"],
+        tables=(
+            _fx_rates(
+                "fx_rates",
+                (("FX-EUR-USD", "EUR", 0.01),),
+            ),
+        ),
+        metadata=(
+            MetadataRow(
+                table_name="fx_rates",
+                attribute_name="fx_rate",
+                sources=(),
+                transformation="Select the applicable currency conversion rate",
+                consumed_by="normalized_db.normalized_sensitivity.normalized_usd",
             ),
         ),
     ),

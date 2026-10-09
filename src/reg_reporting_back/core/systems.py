@@ -87,6 +87,43 @@ SYSTEMS: dict[str, SystemDefinition] = {
             label="Collateral system of record",
             layer="system_of_record",
         ),
+        # ------------------------------------------------------------------
+        # Scenario B: normalized sensitivity
+        #
+        # A second, independent demo scenario. A datapoint selected from the
+        # normalized sensitivity sheet starts here instead of at reporting_db,
+        # so this system publishes an entry column like a reporting layer.
+        # ------------------------------------------------------------------
+        SystemDefinition(
+            name="normalized_db",
+            db_type="sqlite",
+            database_name="normalized_db",
+            label="Sensitivity normalization engine",
+            layer="calculation",
+            entry_table="normalized_sensitivity",
+            entry_attribute="normalized_usd",
+        ),
+        SystemDefinition(
+            name="adjustment_db",
+            db_type="sqlite",
+            database_name="adjustment_db",
+            label="Sensitivity adjustment system",
+            layer="system_of_record",
+        ),
+        SystemDefinition(
+            name="raw_sensitivity",
+            db_type="sqlite",
+            database_name="raw_sensitivity",
+            label="Raw sensitivity system of record",
+            layer="system_of_record",
+        ),
+        SystemDefinition(
+            name="fx_reference",
+            db_type="sqlite",
+            database_name="fx_reference",
+            label="FX reference feed",
+            layer="reference",
+        ),
     )
 }
 

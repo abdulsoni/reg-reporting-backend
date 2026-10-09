@@ -13,6 +13,10 @@ def test_every_seeded_system_is_discovered(client) -> None:
         "staging",
         "loans_db",
         "collateral_db",
+        "normalized_db",
+        "adjustment_db",
+        "raw_sensitivity",
+        "fx_reference",
     ]
     assert all(item["seeded"] for item in body)
     assert not any(item["connected"] for item in body)
@@ -205,3 +209,22 @@ def test_a_target_can_be_explored_after_connecting_by_target(client) -> None:
     ).json()
 
     assert sample["row_count"] >= 1
+
+
+def test_read_row_recovers_a_single_source_record(seeded, data_dir) -> None:
+    from reg_reporting_back.modules.connections.adapters.sqlite import SQLiteAdapter
+
+    adapter = SQLiteAdapter(data_dir / "normalized_db.sqlite")
+
+    row = adapter.read_row(
+        "normalized_sensitivity", "normalized_id", "NORM-SENS-00005"
+    )
+
+    assert row is not None
+    assert row["trade_id"] == "TRD-0003"
+    assert row["sensitivity_type"] == "DELTA"
+    assert row["adjusted_local"] == 460.23
+    assert row["fx_rate"] == 0.01
+    assert row["normalized_usd"] == 3.18
+
+    assert adapter.read_row("normalized_sensitivity", "normalized_id", "missing") is None

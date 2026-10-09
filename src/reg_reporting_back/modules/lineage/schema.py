@@ -159,6 +159,23 @@ class TraceHop(BaseModel):
     is_final_source: bool = False
 
 
+class Reconciliation(BaseModel):
+    """A reported figure checked against the formula its source declares.
+
+    The figure is never overwritten: the value supplied on the report is kept,
+    and ``reconciles`` reports whether the source row reproduces it.
+    """
+
+    attribute: str
+    key: dict[str, str] = Field(
+        default_factory=dict, description="The identifiers used to locate the source row"
+    )
+    formula: str
+    expected_value: float = Field(description="The value supplied on the report")
+    derived_value: float = Field(description="The value the declared formula produces")
+    reconciles: bool
+
+
 class TraceResult(BaseModel):
     """A lineage trace: every hop so far, plus what is needed to continue."""
 
@@ -175,6 +192,10 @@ class TraceResult(BaseModel):
     )
     final_sources: list[str] = Field(default_factory=list)
     current_system: str | None = None
+    reconciliation: "Reconciliation | None" = Field(
+        default=None,
+        description="The selected figure checked against its declared formula",
+    )
 
 
 class GraphNode(BaseModel):

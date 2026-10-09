@@ -78,3 +78,20 @@ def exposure_datapoint(client):
     report_id = generated["report"]["id"]
     datapoints = client.get(f"/reports/{report_id}/datapoints").json()
     return next(item for item in datapoints if item["row_code"] == "0010")
+
+
+@pytest.fixture
+def normalized_datapoint(client):
+    """Generate the normalized sensitivity sheet and return the NORM-SENS-00005 figure.
+
+    That row is the deliberate mismatch: the sheet publishes 3.18 while the
+    declared formula produces 4.6023.
+    """
+
+    generated = client.post("/reports/generate-pdf", json={"scenario": "normalized"}).json()
+    report_id = generated["report"]["id"]
+    datapoints = client.get(f"/reports/{report_id}/datapoints").json()
+    return next(
+        item for item in datapoints
+        if item.get("identifiers", {}).get("normalized_id") == "NORM-SENS-00005"
+    )

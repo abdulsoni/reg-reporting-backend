@@ -28,10 +28,25 @@ HEADER_ALIASES: dict[str, tuple[str, ...]] = {
 
 REQUIRED_FIELDS = frozenset({"row_code", "attribute_name", "value"})
 
+# A wide sheet names its identifying columns directly rather than the
+# Row/Column/Attribute/Value coordinates of a COREP-style return.
+WIDE_HEADER_ALIASES: dict[str, tuple[str, ...]] = {
+    "normalized_id": ("normalized_id",),
+    "trade_id": ("trade_id",),
+    "sensitivity_type": ("sensitivity_type",),
+    "value": ("normalized_usd",),
+}
+
+WIDE_REQUIRED_FIELDS = frozenset({"normalized_id", "value"})
+
+WIDE_ATTRIBUTE_NAME = "normalized_usd"
+WIDE_IDENTIFIER_FIELDS = ("normalized_id", "trade_id", "sensitivity_type")
+
 DATE_LABEL_PATTERN = re.compile(r"reporting date[ \t]*:?[ \t]*(.+)", re.IGNORECASE)
 ENTITY_LABEL_PATTERN = re.compile(r"reporting entity[ \t]*:?[ \t]*(.+)", re.IGNORECASE)
 VERSION_LABEL_PATTERN = re.compile(r"submission version[ \t]*:?[ \t]*(.+)", re.IGNORECASE)
 RETURN_LABEL_PATTERN = re.compile(r"regulatory return[ \t]*:?[ \t]*(.+)", re.IGNORECASE)
+SOURCE_DATASET_LABEL_PATTERN = re.compile(r"source dataset[ \t]*:?[ \t]*(.+)", re.IGNORECASE)
 
 MONTHS = {
     name: index
@@ -52,6 +67,7 @@ class ReportHeader:
     report_code: str | None = None
     report_title: str | None = None
     report_type: str | None = None
+    source_dataset: str | None = None
     reporting_entity: str | None = None
     reporting_date: str | None = None
     submission_version: str | None = None
@@ -103,6 +119,7 @@ def read_header(document: ParsedDocument) -> ReportHeader:
         report_code=report_code,
         report_title=report_title,
         report_type=_labelled(RETURN_LABEL_PATTERN, text),
+        source_dataset=_labelled(SOURCE_DATASET_LABEL_PATTERN, text),
         reporting_entity=_labelled(ENTITY_LABEL_PATTERN, text),
         reporting_date=normalize_date(_labelled(DATE_LABEL_PATTERN, text)),
         submission_version=_labelled(VERSION_LABEL_PATTERN, text),
@@ -169,6 +186,67 @@ def table_rows(table) -> list[dict[str, str | float | None]]:
     return rows
 
 
+def _wide_column_map(header_row: list[str | None]) -> dict[str, int]:
+    """Map a wide-sheet header row onto its field names, or return empty."""
+
+    normalized = [_normalize_header(cell) for cell in header_row]
+    mapping: dict[str, int] = {}
+
+    for field, aliases in WIDE_HEADER_ALIASES.items():
+        for index, name in enumerate(normalized):
+            if name in aliases:
+                mapping[field] = index
+                break
+
+    return mapping if WIDE_REQUIRED_FIELDS <= mapping.keys() else {}
+
+
+def wide_table_rows(table) -> list[dict[str, str | float | None | dict[str, str]]]:
+    """Turn a wide sheet (one identifier column, one value column) into rows.
+
+    A normalized sensitivity sheet names its identifying columns directly
+    (``normalized_id``, ``trade_id``, ``sensitivity_type``) and reports the
+    measure in ``normalized_usd``. Each data row becomes one datapoint whose
+    identifiers travel with it, so the trace can locate the exact source row.
+    """
+
+    if not table.rows:
+        return []
+
+    mapping = _wide_column_map(table.rows[0])
+    if not mapping:
+        return []
+
+    def cell(row: list[str | None], index: int) -> str | None:
+        return row[index] if index < len(row) else None
+
+    rows: list[dict[str, str | float | None | dict[str, str]]] = []
+    for row in table.rows[1:]:
+        value = parse_number(cell(row, mapping["value"]))
+        if value is None:
+            continue
+
+        identifiers = {
+            field: (cell(row, mapping[field]) or "").strip()
+            for field in WIDE_IDENTIFIER_FIELDS
+            if field in mapping
+        }
+        identifiers = {key: value_ for key, value_ in identifiers.items() if value_}
+
+        rows.append(
+            {
+                "row_code": identifiers.get("normalized_id"),
+                "column_code": None,
+                "attribute_name": WIDE_ATTRIBUTE_NAME,
+                "value": value,
+                "unit": None,
+                "identifiers": identifiers,
+            }
+        )
+
+    return rows
+
+
 CURRENCY_UNIT_PATTERN = re.compile(r"^([A-Z]{3})\b")
 
 
@@ -188,7 +266,11 @@ def extract_datapoints(
 ) -> list[Datapoint]:
     """Turn every qualifying table in the document into datapoints."""
 
-    rows = [row for table in document.tables for row in table_rows(table)]
+    rows = [
+        row
+        for table in document.tables
+        for row in (*table_rows(table), *wide_table_rows(table))
+    ]
 
     return [
         Datapoint(
@@ -202,6 +284,7 @@ def extract_datapoints(
             value=row["value"],
             unit=row["unit"],
             currency=currency or infer_currency(row["unit"]),
+            identifiers=row.get("identifiers", {}),
         )
         for row in rows
     ]

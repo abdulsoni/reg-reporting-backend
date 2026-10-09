@@ -49,6 +49,7 @@ The trace only steps into a system the user has already connected. Anything
 else is parked in ``pending_systems`` so the UI can ask for the connection.
 """
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,6 +69,7 @@ from .explorer import (
     parse_sources,
     resolve_record,
 )
+from .formula import evaluate_arithmetic
 from .repository import (
     Trace,
     TraceRepository,
@@ -83,14 +85,20 @@ from .schema import (
     GraphNode,
     HopStatus,
     LineageGraph,
+    Reconciliation,
     TraceHop,
     TraceRequest,
     TraceResult,
     TraceStatus,
 )
 
-# Vertical spacing between graph rows, in pixels.
-NODE_SPACING = 150
+# Graph layout spacing, in pixels. The graph flows left to right, so the
+# columns are spread horizontally (upstream on the left, the report datapoint
+# on the right) and the nodes sharing a column are spread vertically. The
+# horizontal gap is wider than a node box so boxes and edge labels never
+# overlap.
+HORIZONTAL_SPACING = 340
+VERTICAL_SPACING = 180
 
 REPORTING_SYSTEM = "reporting_db"
 
@@ -350,6 +358,7 @@ class LineageService:
             trace,
             status,
             complete_walk,
+            reconciliation=_reconcile(datapoint, all_hops),
         )
 
     # ------------------------------------------------------------------
@@ -378,10 +387,17 @@ class LineageService:
             hops=hops,
         )
 
+        datapoint = (
+            ReportRepository.get_datapoint(trace.datapoint_id)
+            if trace.datapoint_id
+            else None
+        )
+
         return _to_result(
             trace,
             TraceStatus(trace.status),
             walk,
+            reconciliation=_reconcile(datapoint, hops),
         )
 
     # ------------------------------------------------------------------
@@ -408,6 +424,14 @@ class LineageService:
         if not hops:
             raise TraceError(
                 f"Trace '{trace_id}' has no hops yet."
+            )
+
+        trace = TraceRepository.get(trace_id)
+        reconciliation = None
+        if trace is not None and trace.datapoint_id:
+            reconciliation = _reconcile(
+                ReportRepository.get_datapoint(trace.datapoint_id),
+                hops,
             )
 
         depths: dict[str, int] = {}
@@ -510,19 +534,27 @@ class LineageService:
             }
 
         # --------------------------------------------------------------
+        # Attach the reconciliation to the entry (root) node.
+        # --------------------------------------------------------------
+
+        if reconciliation is not None:
+            for identifier, depth in depths.items():
+                if depth == 1:
+                    details[identifier]["reconciliation"] = reconciliation.model_dump()
+
+        # --------------------------------------------------------------
         # Build React Flow nodes.
         # --------------------------------------------------------------
+
+        positions = _layout_positions(depths, edges)
 
         nodes = [
             GraphNode(
                 id=identifier,
-                position={
-                    "x": 0,
-                    "y": -depth * NODE_SPACING,
-                },
+                position=positions[identifier],
                 data=details[identifier],
             )
-            for identifier, depth in depths.items()
+            for identifier in depths
         ]
 
         return LineageGraph(
@@ -540,6 +572,69 @@ class LineageService:
         )
 
 
+def _layout_positions(
+    depths: dict[str, int],
+    edges: dict[str, GraphEdge],
+) -> dict[str, dict[str, float]]:
+    """Lay the graph out left to right so React Flow does not stack it.
+
+    Nodes are grouped into columns by depth. Upstream nodes (larger depth)
+    sit on the left and the report datapoint (depth 1) on the right. Within a
+    column, nodes are ordered by the average row of their upstream neighbours,
+    which keeps linked nodes close together and reduces edge crossings.
+    """
+
+    if not depths:
+        return {}
+
+    max_depth = max(depths.values())
+
+    columns: dict[int, list[str]] = {}
+    for identifier, depth in depths.items():
+        columns.setdefault(depth, []).append(identifier)
+
+    # Edges point upstream -> downstream, so the source is the deeper node.
+    upstream: dict[str, list[str]] = {}
+    for edge in edges.values():
+        if edge.source in depths and edge.target in depths:
+            upstream.setdefault(edge.target, []).append(edge.source)
+
+    row_of: dict[str, int] = {}
+    ordered: dict[int, list[str]] = {}
+
+    # Order the deepest column first so a node's upstream neighbours already
+    # have a row when the shallower columns are arranged.
+    for depth in range(max_depth, 0, -1):
+        column = sorted(columns.get(depth, []))
+
+        def barycenter(identifier: str) -> float:
+            rows = [
+                row_of[source]
+                for source in upstream.get(identifier, [])
+                if source in row_of
+            ]
+            if not rows:
+                return float("inf")
+            return sum(rows) / len(rows)
+
+        column.sort(key=lambda identifier: (barycenter(identifier), identifier))
+        ordered[depth] = column
+        for row, identifier in enumerate(column):
+            row_of[identifier] = row
+
+    positions: dict[str, dict[str, float]] = {}
+    for depth, column in ordered.items():
+        middle = (len(column) - 1) / 2
+        x = (max_depth - depth) * HORIZONTAL_SPACING
+        for row, identifier in enumerate(column):
+            positions[identifier] = {
+                "x": x,
+                "y": (row - middle) * VERTICAL_SPACING,
+            }
+
+    return positions
+
+
 # ======================================================================
 # TRACE START
 # ======================================================================
@@ -550,12 +645,15 @@ def _start_new_trace(
     datapoint,
     system_name: str,
 ):
-    """Create a new report trace.
+    """Create a new trace from the datapoint's entry system.
 
-    A new report trace can only begin from reporting_db.
+    Any system that publishes an entry column can start a trace.
+    ``reporting_db`` is the default for a regulatory return, but a datapoint
+    selected from another entry point (for example the normalized sensitivity
+    sheet) starts from that system instead.
     """
 
-    if system_name != REPORTING_SYSTEM:
+    if entry_reference(system_name) is None:
         definition = get_system(system_name)
 
         label = definition.label if definition else system_name
@@ -569,12 +667,12 @@ def _start_new_trace(
     trace = TraceRepository.create(
         request.report_id or datapoint.report_id,
         datapoint.id,
-        REPORTING_SYSTEM,
+        system_name,
     )
 
     entry = _entry_reference(
         datapoint,
-        REPORTING_SYSTEM,
+        system_name,
     )
 
     return trace, entry
@@ -1026,6 +1124,7 @@ def _to_result(
     trace: Trace,
     status: TraceStatus,
     walk: _Walk,
+    reconciliation: Reconciliation | None = None,
 ) -> TraceResult:
     """Convert internal trace state into the API response."""
 
@@ -1046,4 +1145,79 @@ def _to_result(
 
         # The origin never changes when a trace is resumed.
         current_system=walk.origin_system or None,
+
+        reconciliation=reconciliation,
+    )
+
+
+# ======================================================================
+# RECONCILIATION
+# ======================================================================
+
+
+def _reconcile(
+    datapoint,
+    hops: list[TraceHop],
+) -> Reconciliation | None:
+    """Check a reported figure against the formula its source declares.
+
+    Only figures that carry identifiers can be located in a source system, so a
+    plain COREP datapoint resolves to ``None``. The root hop's ``transformation``
+    is evaluated over the values of the matching source row; the reported value
+    is never changed, only compared.
+    """
+
+    if datapoint is None or not datapoint.identifiers:
+        return None
+
+    root = next(
+        (hop for hop in hops if len(parse_branch_path(hop.branch_path)) == 1),
+        None,
+    )
+
+    if root is None or not root.transformation:
+        return None
+
+    if not ConnectionRepository.is_connected(root.system):
+        return None
+
+    try:
+        adapter = ConnectionService.adapter_for(root.system)
+    except Exception:  # pragma: no cover - connection raced away
+        return None
+
+    row: dict[str, Any] | None = None
+    key: dict[str, str] = {}
+
+    for name, value in datapoint.identifiers.items():
+        try:
+            candidate = adapter.read_row(root.table_name, name, value)
+        except Exception:
+            continue
+        if candidate is not None:
+            row = candidate
+            key = {name: value}
+            break
+
+    if row is None:
+        return None
+
+    derived = evaluate_arithmetic(root.transformation, row)
+    expected = datapoint.value
+
+    if derived is None or expected is None:
+        return None
+
+    return Reconciliation(
+        attribute=root.attribute_name,
+        key=key,
+        formula=root.transformation,
+        expected_value=float(expected),
+        derived_value=round(float(derived), 6),
+        reconciles=math.isclose(
+            float(derived),
+            float(expected),
+            rel_tol=1e-6,
+            abs_tol=1e-6,
+        ),
     )

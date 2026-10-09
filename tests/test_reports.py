@@ -39,6 +39,37 @@ def test_generation_accepts_overrides(client) -> None:
     assert body["datapoints"][0]["report_code"] == "C08.00"
 
 
+def test_the_normalized_scenario_publishes_a_c90_sheet(client) -> None:
+    body = client.post("/reports/generate-pdf", json={"scenario": "normalized"}).json()
+
+    summary = body["report"]
+    assert summary["report_type"] == "COREP"
+    assert summary["report_code"] == "C90.00"
+    assert summary["report_title"] == "Market Risk Sensitivities"
+    assert summary["source_dataset"] == "Normalized Sensitivities"
+    assert summary["currency"] == "USD"
+    assert summary["reporting_entity"] == "J P Morgan Bank"
+    assert summary["reporting_date"] == "2026-06-30"
+    assert summary["submission_version"] == "v1"
+    assert summary["file_name"] == "corep_c90.pdf"
+    assert summary["datapoint_count"] == 10
+
+    datapoints = body["datapoints"]
+    assert len(datapoints) == 10
+    assert [d["attribute_name"] for d in datapoints] == ["normalized_usd"] * 10
+    assert {d["identifiers"]["normalized_id"] for d in datapoints} == {
+        "NORM-SENS-00001", "NORM-SENS-00002", "NORM-SENS-00003", "NORM-SENS-00004",
+        "NORM-SENS-00005", "NORM-SENS-00006", "NORM-SENS-00007", "NORM-SENS-00008",
+        "NORM-SENS-00009", "NORM-SENS-00010",
+    }
+    # The supplied 3.18 is preserved even though the formula produces 4.6023.
+    mismatch = next(
+        d for d in datapoints
+        if d["identifiers"]["normalized_id"] == "NORM-SENS-00005"
+    )
+    assert mismatch["value"] == 3.18
+
+
 def test_a_report_and_its_datapoints_are_readable(client, report_id: str) -> None:
     detail = client.get(f"/reports/{report_id}").json()
 

@@ -20,9 +20,13 @@ CREATE TABLE IF NOT EXISTS reports (
     id                  TEXT PRIMARY KEY,
     file_name           TEXT NOT NULL,
     report_type         TEXT,
+    report_code         TEXT,
+    report_title        TEXT,
+    source_dataset      TEXT,
     reporting_entity    TEXT,
     reporting_date      TEXT,
     submission_version  TEXT,
+    currency            TEXT,
     page_count          INTEGER NOT NULL DEFAULT 0,
     table_count         INTEGER NOT NULL DEFAULT 0,
     raw_json            TEXT,
@@ -40,7 +44,8 @@ CREATE TABLE IF NOT EXISTS report_datapoints (
     attribute_name  TEXT,
     value           REAL,
     unit            TEXT,
-    currency        TEXT
+    currency        TEXT,
+    identifiers_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS lineage_traces (
@@ -98,6 +103,11 @@ APP_SCHEMA_STATEMENTS = tuple(
 SCHEMA_MIGRATIONS = (
     ("lineage_traces", "origin_system", "TEXT"),
     ("system_connections", "params_json", "TEXT"),
+    ("reports", "report_code", "TEXT"),
+    ("reports", "report_title", "TEXT"),
+    ("reports", "source_dataset", "TEXT"),
+    ("reports", "currency", "TEXT"),
+    ("report_datapoints", "identifiers_json", "TEXT"),
 )
 
 

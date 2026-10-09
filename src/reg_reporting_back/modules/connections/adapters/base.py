@@ -132,6 +132,19 @@ class DatabaseAdapter(ABC):
         """Return the values of one column, for evidence shown against a hop."""
 
     @abstractmethod
+    def read_row(
+        self,
+        table: str,
+        key_column: str,
+        key_value: Any,
+    ) -> dict[str, Any] | None:
+        """Return one row located by a key column, as a JSON-safe mapping.
+
+        Used to reconcile a reported figure against the source record it was
+        derived from. Returns ``None`` when no row matches.
+        """
+
+    @abstractmethod
     def read_lineage_metadata(
         self,
         table: str,

@@ -124,6 +124,21 @@ class SQLiteAdapter(DatabaseAdapter):
         with self._connection() as conn:
             return [json_safe(row[0]) for row in conn.execute(statement).fetchall()]
 
+    def read_row(
+        self,
+        table: str,
+        key_column: str,
+        key_value: Any,
+    ) -> dict[str, Any] | None:
+        target = validate_identifier(table, "table name")
+        key = validate_identifier(key_column, "column name")
+        statement = f"SELECT * FROM {target} WHERE {key} = ? LIMIT 1"
+
+        with self._connection() as conn:
+            row = conn.execute(statement, (key_value,)).fetchone()
+
+        return {name: json_safe(row[name]) for name in row.keys()} if row else None
+
     def read_lineage_metadata(
         self,
         table: str,

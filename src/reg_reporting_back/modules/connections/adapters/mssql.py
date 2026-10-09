@@ -314,6 +314,24 @@ class SqlServerAdapter(DatabaseAdapter):
             )
             return [json_safe(row[0]) for row in result.fetchall()]
 
+    def read_row(
+        self,
+        table: str,
+        key_column: str,
+        key_value: Any,
+    ) -> dict[str, Any] | None:
+        validate_identifier(table, "table name")
+        validate_identifier(key_column, "column name")
+        target = qualified_name(self.schema, table)
+
+        with self._connection() as conn:
+            row = conn.execute(
+                text(f"SELECT TOP (1) * FROM {target} WHERE {key_column} = :key_value"),
+                {"key_value": key_value},
+            ).mappings().first()
+
+        return {key: json_safe(value) for key, value in row.items()} if row else None
+
     def read_lineage_metadata(
         self,
         table: str,

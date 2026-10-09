@@ -160,3 +160,49 @@ def test_a_pdf_without_a_usable_table_is_rejected(client) -> None:
 
     assert response.status_code == 400
     assert "datapoint" in response.json()["detail"].lower()
+
+
+def test_the_normalized_sheet_round_trips_with_identifiers() -> None:
+    pdf = generator.build_pdf(
+        report_code="C90.00",
+        report_title="Market Risk Sensitivities",
+        report_type="COREP",
+        reporting_entity="J P Morgan Bank",
+        reporting_date="2026-06-30",
+        submission_version="v1",
+        unit="USD",
+        datapoints=list(generator.DEFAULT_NORMALIZED_DATAPOINTS),
+        sheet="normalized",
+        source_dataset="Normalized Sensitivities",
+    )
+
+    document = parse(pdf)
+    header = read_header(document)
+    assert header.report_code == "C90.00"
+    assert header.report_title == "Market Risk Sensitivities"
+    assert header.report_type == "COREP"
+    assert header.source_dataset == "Normalized Sensitivities"
+
+    table = document.tables[0]
+    assert table.rows[0] == [
+        "Normalized ID",
+        "Trade ID",
+        "Sensitivity Type",
+        "Normalized USD",
+    ]
+
+    datapoints = extract_datapoints(
+        document, header, "report-test", "USD", lambda prefix: f"{prefix}-test"
+    )
+    assert len(datapoints) == 10
+    assert all(d.attribute_name == "normalized_usd" for d in datapoints)
+    first = datapoints[0]
+    assert first.identifiers == {
+        "normalized_id": "NORM-SENS-00001",
+        "trade_id": "TRD-0001",
+        "sensitivity_type": "DELTA",
+    }
+    assert first.value == 405.72
+
+    mismatch = next(d for d in datapoints if d.identifiers.get("normalized_id") == "NORM-SENS-00005")
+    assert mismatch.value == 3.18

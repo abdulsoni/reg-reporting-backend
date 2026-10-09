@@ -1,19 +1,21 @@
 """Read and write access to reports and their datapoints."""
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 
 from sqlalchemy import text
 
 from ...core.database import session
 
 REPORT_COLUMNS = """
-    id, file_name, report_type, reporting_entity, reporting_date,
-    submission_version, page_count, table_count, created_at
+    id, file_name, report_type, report_code, report_title, source_dataset,
+    reporting_entity, reporting_date, submission_version, currency,
+    page_count, table_count, created_at
 """
 
 DATAPOINT_COLUMNS = """
     id, report_id, report_code, report_title, row_code, column_code,
-    attribute_name, value, unit, currency
+    attribute_name, value, unit, currency, identifiers_json
 """
 
 
@@ -24,9 +26,13 @@ class Report:
     id: str
     file_name: str
     report_type: str | None
+    report_code: str | None
+    report_title: str | None
+    source_dataset: str | None
     reporting_entity: str | None
     reporting_date: str | None
     submission_version: str | None
+    currency: str | None
     page_count: int
     table_count: int
     created_at: str
@@ -46,6 +52,19 @@ class Datapoint:
     value: float | None
     unit: str | None
     currency: str | None
+    identifiers: dict[str, str] = field(default_factory=dict)
+
+
+def _identifiers_from_json(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return {str(key): str(value) for key, value in decoded.items() if value is not None}
 
 
 class ReportRepository:
@@ -59,9 +78,10 @@ class ReportRepository:
                     INSERT INTO reports (
                         {REPORT_COLUMNS}, raw_json, pdf_bytes
                     ) VALUES (
-                        :id, :file_name, :report_type, :reporting_entity, :reporting_date,
-                        :submission_version, :page_count, :table_count, :created_at,
-                        :raw_json, :pdf_bytes
+                        :id, :file_name, :report_type, :report_code, :report_title,
+                        :source_dataset, :reporting_entity, :reporting_date,
+                        :submission_version, :currency, :page_count, :table_count,
+                        :created_at, :raw_json, :pdf_bytes
                     )
                     """
                 ),
@@ -69,9 +89,13 @@ class ReportRepository:
                     "id": report.id,
                     "file_name": report.file_name,
                     "report_type": report.report_type,
+                    "report_code": report.report_code,
+                    "report_title": report.report_title,
+                    "source_dataset": report.source_dataset,
                     "reporting_entity": report.reporting_entity,
                     "reporting_date": report.reporting_date,
                     "submission_version": report.submission_version,
+                    "currency": report.currency,
                     "page_count": report.page_count,
                     "table_count": report.table_count,
                     "created_at": report.created_at,
@@ -138,7 +162,8 @@ class ReportRepository:
                     INSERT INTO report_datapoints ({DATAPOINT_COLUMNS})
                     VALUES (
                         :id, :report_id, :report_code, :report_title, :row_code,
-                        :column_code, :attribute_name, :value, :unit, :currency
+                        :column_code, :attribute_name, :value, :unit, :currency,
+                        :identifiers_json
                     )
                     """
                 ),
@@ -154,10 +179,19 @@ class ReportRepository:
                         "value": item.value,
                         "unit": item.unit,
                         "currency": item.currency,
+                        "identifiers_json": (
+                            json.dumps(item.identifiers) if item.identifiers else None
+                        ),
                     }
                     for item in datapoints
                 ],
             )
+
+    @staticmethod
+    def _datapoint(row) -> Datapoint:
+        values = dict(row)
+        identifiers = _identifiers_from_json(values.pop("identifiers_json", None))
+        return Datapoint(**values, identifiers=identifiers)
 
     @staticmethod
     def get_datapoints(report_id: str) -> list[Datapoint]:
@@ -171,7 +205,7 @@ class ReportRepository:
                 ),
                 {"report_id": report_id},
             ).mappings().all()
-        return [Datapoint(**dict(row)) for row in rows]
+        return [ReportRepository._datapoint(row) for row in rows]
 
     @staticmethod
     def get_datapoint(datapoint_id: str) -> Datapoint | None:
@@ -182,4 +216,4 @@ class ReportRepository:
                 ),
                 {"id": datapoint_id},
             ).mappings().first()
-        return Datapoint(**dict(row)) if row else None
+        return ReportRepository._datapoint(row) if row else None

@@ -86,8 +86,10 @@ curl.exe http://127.0.0.1:8000/lineage/trace/<trace id>/graph
 
 ## Demo systems
 
-`POST /seed/databases` writes six small SQLite databases to `DATA_DIR`. The
-figures reconcile, so the lineage a trace produces is verifiable by hand:
+`POST /seed/databases` writes ten small SQLite databases to `DATA_DIR`. They
+form two independent scenarios. The figures reconcile, so the lineage a trace
+produces is verifiable by hand -- except for the one deliberate mismatch
+Scenario B uses to demonstrate a flagged calculation error:
 
 | System | Role |
 | --- | --- |
@@ -97,6 +99,10 @@ figures reconcile, so the lineage a trace produces is verifiable by hand:
 | `staging` | integration staging |
 | `loans_db` | loans system of record |
 | `collateral_db` | collateral system of record |
+| `normalized_db` | normalized sensitivity engine (Scenario B) |
+| `adjustment_db` | sensitivity adjustment system (Scenario B) |
+| `raw_sensitivity` | raw sensitivity system of record (Scenario B) |
+| `fx_reference` | FX reference feed (Scenario B) |
 
 ```
 exposure 1240.50 = off balance 1100.00 + allocated collateral 140.50
@@ -122,6 +128,72 @@ same systems are never walked.
 
 `reporting_db` also holds a `c0800_facts` column with no published lineage, used
 to exercise the "no metadata" path.
+
+### Scenario B: normalized sensitivity
+
+A datapoint selected from the normalized sensitivity sheet starts at
+`normalized_db` instead of `reporting_db`. Any system that publishes an entry
+column can start a trace, so a newer entry point only has to be added to the
+registry.
+
+`{"scenario":"normalized"}` renders a full ten-row C 90.00 sheet, one row per
+normalized sensitivity:
+
+| Normalized ID | Trade ID | Sensitivity Type | Normalized USD |
+| --- | --- | --- | --- |
+| NORM-SENS-00001 | TRD-0001 | DELTA | 405.72 |
+| ... | | | |
+| NORM-SENS-00010 | TRD-0006 | DELTA | 829.92 |
+
+Each datapoint carries its identifying columns as `identifiers`, so the tracer
+can locate the exact source row. Every row but NORM-SENS-00005 reconciles:
+
+```
+adjusted_local 460.23 = original_local 500.25 + approved_adjustment_local -40.02
+normalized_usd   4.60 = adjusted_local 460.23 * fx_rate 0.01
+```
+
+NORM-SENS-00005 is the deliberate exception: the sheet publishes `3.18` while
+the formula produces `4.6023`. The reported figure is never rewritten; the trace
+returns a `reconciliation` alongside the hops:
+
+```json
+{
+  "attribute": "normalized_usd",
+  "key": {"normalized_id": "NORM-SENS-00005"},
+  "formula": "adjusted_local * fx_rate",
+  "expected_value": 3.18,
+  "derived_value": 4.6023,
+  "reconciles": false
+}
+```
+
+The formula comes from the `transformation` the source system publishes and is
+evaluated safely over the matching source row, so a verbose or hostile metadata
+string simply produces no check rather than an error.
+
+```
+normalized_db.normalized_sensitivity.normalized_usd        (reported 3.18)
+├─ normalized_db.normalized_sensitivity.adjusted_local
+│  ├─ raw_sensitivity.raw_sensitivity.sensitivity_local
+│  └─ adjustment_db.adjustments.adjustment_amount_local
+│     └─ adjustment_db.adjustments.approval_status
+└─ fx_reference.fx_rates.fx_rate
+```
+
+The join/filter keys (`sensitivity_id`, `fx_rate_id`) stay context inside the
+transformation text; only columns the transformation reads become nodes. The
+approval gate is published as a dependency of the adjustment. The trace stops
+at three sources: the raw sensitivity value, the FX rate actually used, and the
+approval status.
+
+```
+# Generate the normalized sheet, then start the trace from that system
+curl.exe -X POST http://127.0.0.1:8000/reports/generate-pdf -H "Content-Type: application/json" -d '{"scenario":"normalized"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/connect -H "Content-Type: application/json" -d '{"system":"normalized_db"}'
+curl.exe -X POST http://127.0.0.1:8000/lineage/trace -H "Content-Type: application/json" -d '{"system":"normalized_db","datapoint_id":"<normalized_usd dp id>"}'
+```
+
 
 ### Lineage metadata
 
@@ -250,8 +322,9 @@ uv run pytest
 
 The suite runs fully offline against temporary copies of the seeded databases.
 It covers the PDF round trip, connection gating and revocation, identifier
-safety, ambiguity handling, the dependency-graph trace, resumption one connection
-at a time, and the graph projection.
+safety, ambiguity handling, the dependency-graph trace (both the COREP and
+normalized-sensitivity scenarios), resumption one connection at a time, and the
+graph projection.
 
 ## Layout
 

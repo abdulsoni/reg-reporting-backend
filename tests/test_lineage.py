@@ -292,7 +292,16 @@ def test_the_graph_is_shaped_for_react_flow(client, connect, exposure_datapoint)
 
     assert set(graph) >= {"nodes", "edges"}
     positions = {(node["position"]["x"], node["position"]["y"]) for node in graph["nodes"]}
-    assert len(positions) > 1, "nodes have to be laid out on distinct rows"
+    assert len(positions) == len(graph["nodes"]), "every node needs its own position"
+
+    # The graph flows left to right: the report datapoint (depth 1) is the
+    # right-most column and the systems of record are on the left.
+    x_by_depth: dict[int, set[float]] = {}
+    for node in graph["nodes"]:
+        x_by_depth.setdefault(node["data"]["depth"], set()).add(node["position"]["x"])
+    assert all(len(xs) == 1 for xs in x_by_depth.values()), "a depth is one column"
+    columns = [next(iter(x_by_depth[depth])) for depth in sorted(x_by_depth)]
+    assert columns == sorted(columns, reverse=True)
 
     node_ids = {node["id"] for node in graph["nodes"]}
     for edge in graph["edges"]:
